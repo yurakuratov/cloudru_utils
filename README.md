@@ -97,6 +97,38 @@ cloud_client.job_status(job_id)
 cloud_client.job_logs(job_id, tail=50)
 ```
 
+### Get current workspace info
+
+```python
+workspace = cloud_client.get_workspace_info()
+print(workspace["name"], workspace["namespace"])
+
+# allocations are cached on the client after the call
+print(cloud_client.workspace_allocations)
+
+# pretty rich output (panel + allocations table)
+cloud_client.workspace_info(refresh=False)
+
+# show allocation resource availability (auto-resolves allocation from workspace)
+cloud_client.available_resources()
+
+# only resources with available > 0
+cloud_client.available_resources(only_available=True)
+
+# explicit allocation id
+cloud_client.available_resources(allocation_id="19a9b0f1-34b2-4a2a-9e94-98f8b55b0538")
+
+# force endpoint source
+cloud_client.available_resources(source="instance_types_available")
+cloud_client.available_resources(source="allocations_instance_types_availability")
+
+# supported submit-ready instance_types for default region
+cloud_client.instance_types()
+
+# supported submit-ready instance_types for specific region
+cloud_client.instance_types(region="SR006")
+```
+
 ### Submit job
 
 ```python
@@ -153,6 +185,25 @@ Show a formatted status panel for one job (created/pending/running/completed/err
 
 ### `job_logs(job_id, tail=100, verbose=False, region='SR006')`
 Stream and print logs for a job.
+
+### `get_workspace_info(refresh=True)`
+Get current workspace information from `/public/v2/workspaces/v3/{workspace_id}`.
+Also stores connected allocations in `cloud_client.workspace_allocations`.
+
+### `workspace_info(refresh=True)`
+Print current workspace info in rich format (summary panel + allocations table).
+
+### `available_resources(allocation_id=None, only_available=False, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
+Show allocation instance type availability in rich tables (one table per allocation).
+Sort order: H100(A100+) -> A100 80GB -> A100 40GB -> V100 -> CPU, then by GPU count and RAM size.
+If `allocation_id` is not provided, uses all current workspace allocations.
+Includes `instance_type` mapping from `/public/v2/configs` (cached once per client) so values can be passed to `submit_job(instance_type=...)`.
+In the output table, `instance_type` is submit-ready API value and `Instance Name` is human-readable label.
+`source` controls backend endpoint: `auto` | `instance_types_available` | `allocations_instance_types_availability`.
+
+### `instance_types(region=None, refresh_configs=False, table_width=160)`
+Show supported instance types from `/public/v2/configs` for one region.
+If `region` is not provided, uses workspace region when available, otherwise `SR006`.
 
 ### `kill_job(job_id, region='SR006')`
 Delete/terminate a job.

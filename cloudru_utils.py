@@ -7,6 +7,7 @@ CLIENT_LIB_AVAILABLE = True
 
 import contextlib
 import io
+import re
 
 from rich.table import Table
 from rich.console import Console
@@ -91,6 +92,9 @@ class CloudRuAPIClient:
     client.job_status(job_id)
     client.job_logs(job_id)
     client.job_logs(job_id, tail=10)
+    client.workspace_info()
+    client.instance_types()
+    client.available_resources()
     client.kill_job(job_id)
 
     cloud_client.jobs(n_last=10)
@@ -135,7 +139,29 @@ class CloudRuAPIClient:
         else:
             self.x_api_key = x_api_key
             self.x_workspace_id = x_workspace_id
+        self._workspace_info_cache = None
+        self._workspace_allocations_cache = []
+        self._configs_cache = None
+        self._instance_types_by_region_cache = {}
+        self._instance_types_normalized_by_region_cache = {}
         self._refresh_token()
+
+    def __repr__(self):
+        return (
+            "CloudRuAPIClient("
+            f"client_id={self.client_id!r}, "
+            f"client_secret={self.client_secret!r}, "
+            f"x_api_key={self.x_api_key!r}, "
+            f"x_workspace_id={self.x_workspace_id!r}, "
+            f"access_token={getattr(self, 'access_token', None)!r}, "
+            f"access_token_expires_at={getattr(self, 'access_token_expires_at', None)!r}, "
+            f"workspace_info_cache={self._workspace_info_cache!r}, "
+            f"workspace_allocations={self._workspace_allocations_cache!r}, "
+            f"configs_cache={self._configs_cache!r}, "
+            f"instance_types_by_region_cache={self._instance_types_by_region_cache!r}, "
+            f"instance_types_normalized_by_region_cache={self._instance_types_normalized_by_region_cache!r}"
+            ")"
+        )
 
     def _service_auth(self):
         response = requests.post(
@@ -219,6 +245,168 @@ class CloudRuAPIClient:
 
         response = requests.get(url, headers=headers)
         return response.json()
+
+    def _get_workspace_info(self, workspace_id=None):
+        """Get workspace information including connected allocations.
+
+        Args:
+            workspace_id (str, optional): Workspace ID. Defaults to current client workspace.
+
+        Returns:
+            dict: Response from workspace API endpoint
+        """
+        self._refresh_token()
+        workspace_id = workspace_id or self.x_workspace_id
+        url = f'{self.API_URL}/workspaces/v3/{workspace_id}'
+
+        headers = {
+            'accept': 'application/json',
+            'authorization': self.access_token,
+        }
+
+        response = requests.get(url, headers=headers)
+        return response.json()
+
+    def _get_allocation_instance_types_availability(self, allocation_id):
+        """Get current resource availability for allocation instance types.
+
+        Args:
+            allocation_id (str): Allocation ID
+
+        Returns:
+            list[dict]: Availability rows with `instance_type` and `available`
+        """
+        self._refresh_token()
+        url = f'{self.API_URL}/allocations/{allocation_id}/instance_types_availability'
+
+        headers = {
+            'accept': 'application/json',
+            'x-workspace-id': self.x_workspace_id,
+            'x-api-key': self.x_api_key,
+            'authorization': self.access_token,
+        }
+
+        response = requests.get(url, headers=headers)
+        return response.json()
+
+    def _get_instance_types_available(self, region, allocation_name):
+        """Get available instance types for allocation using region endpoint.
+
+        Args:
+            region (str): Region key, e.g. SR006
+            allocation_name (str): Allocation name
+
+        Returns:
+            dict: Response with `instance_types` array
+        """
+        self._refresh_token()
+        url = f'{self.API_URL}/instance_types/{region}/available'
+
+        headers = {
+            'accept': 'application/json',
+            'x-workspace-id': self.x_workspace_id,
+            'x-api-key': self.x_api_key,
+            'authorization': self.access_token,
+        }
+
+        params = {'allocation_name': allocation_name}
+        response = requests.get(url, headers=headers, params=params)
+        return response.json()
+
+    def _get_configs(self, cluster_type='MT'):
+        """Get platform configs (regions, instance types, images)."""
+        self._refresh_token()
+        url = f'{self.API_URL}/configs'
+
+        headers = {
+            'accept': 'application/json',
+            'x-workspace-id': self.x_workspace_id,
+            'x-api-key': self.x_api_key,
+            'authorization': self.access_token,
+        }
+
+        params = {'cluster_type': cluster_type}
+        response = requests.get(url, headers=headers, params=params)
+        return response.json()
+
+    @staticmethod
+    def _normalize_instance_type_name(instance_type_name):
+        normalized = instance_type_name.lower().strip()
+        normalized = normalized.replace('gb ram', 'gbram')
+        normalized = normalized.replace('gb', 'gb')
+        normalized = normalized.replace('cpu-cores', 'cpu')
+        normalized = normalized.replace('vcpu-cores', 'vcpu')
+        normalized = re.sub(r'\s+', '', normalized)
+        normalized = re.sub(r'[^a-z0-9+.]', '', normalized)
+        return normalized
+
+    def _load_instance_types_cache(self, refresh=False, cluster_type='MT'):
+        """Load instance types by region from /configs once and cache them."""
+        if self._configs_cache is not None and self._instance_types_by_region_cache and not refresh:
+            return
+
+        configs = self._get_configs(cluster_type=cluster_type)
+        self._configs_cache = configs
+        self._instance_types_by_region_cache = {}
+        self._instance_types_normalized_by_region_cache = {}
+
+        for region in configs.get('regions', []):
+            region_key = region.get('key')
+            if not region_key:
+                continue
+
+            exact_map = {}
+            normalized_map = {}
+            for instance_type in region.get('instances_types', []):
+                instance_key = instance_type.get('key')
+                instance_name = instance_type.get('name')
+                if not instance_key or not instance_name:
+                    continue
+                exact_map[instance_name] = instance_key
+
+                normalized_name = self._normalize_instance_type_name(instance_name)
+                if normalized_name not in normalized_map:
+                    normalized_map[normalized_name] = instance_key
+
+            self._instance_types_by_region_cache[region_key] = exact_map
+            self._instance_types_normalized_by_region_cache[region_key] = normalized_map
+
+    def _resolve_instance_type_key(self, instance_type_name, region_key=None):
+        """Resolve public instance type name to API instance key."""
+        normalized_name = self._normalize_instance_type_name(instance_type_name)
+
+        if region_key and region_key in self._instance_types_by_region_cache:
+            exact_map = self._instance_types_by_region_cache.get(region_key, {})
+            if instance_type_name in exact_map:
+                return exact_map[instance_type_name]
+
+            normalized_map = self._instance_types_normalized_by_region_cache.get(region_key, {})
+            if normalized_name in normalized_map:
+                return normalized_map[normalized_name]
+
+        found_keys = set()
+        for current_region, exact_map in self._instance_types_by_region_cache.items():
+            if instance_type_name in exact_map:
+                found_keys.add(exact_map[instance_type_name])
+
+            normalized_map = self._instance_types_normalized_by_region_cache.get(current_region, {})
+            if normalized_name in normalized_map:
+                found_keys.add(normalized_map[normalized_name])
+
+        if len(found_keys) == 1:
+            return list(found_keys)[0]
+        return None
+
+    def _default_region_from_workspace(self):
+        """Resolve default region from current workspace allocations."""
+        if not self._workspace_allocations_cache:
+            self.get_workspace_info(refresh=False)
+
+        for allocation in self._workspace_allocations_cache:
+            cluster_key = allocation.get('cluster_key')
+            if cluster_key:
+                return cluster_key
+        return 'SR006'
 
     def _get_job_logs(self, job_id, tail=100, verbose=False, region='SR006'):
         """Get logs for a specific job
@@ -426,6 +614,423 @@ class CloudRuAPIClient:
                 print(log)
         except KeyboardInterrupt:
             ...
+
+    def get_workspace_info(self, refresh=True):
+        """Get current workspace info and cache connected allocations.
+
+        Args:
+            refresh (bool, optional): Force refresh from API. Defaults to True.
+
+        Returns:
+            dict: Workspace information
+        """
+        if not refresh and self._workspace_info_cache is not None:
+            return self._workspace_info_cache
+
+        self._workspace_info_cache = self._get_workspace_info(self.x_workspace_id)
+        self._workspace_allocations_cache = self._workspace_info_cache.get('allocations', [])
+        return self._workspace_info_cache
+
+    @property
+    def workspace_info_cache(self):
+        return self._workspace_info_cache
+
+    @property
+    def workspace_allocations(self):
+        return self._workspace_allocations_cache
+
+    def workspace_info(self, refresh=True):
+        """Show human-readable workspace information in rich format.
+
+        Args:
+            refresh (bool, optional): Force refresh from API. Defaults to True.
+
+        Returns:
+            None: Prints formatted workspace info
+        """
+        info = self.get_workspace_info(refresh=refresh)
+        allocations = info.get('allocations', [])
+
+        info_text = Text()
+        info_text.append("Workspace ID: ", style="bold")
+        info_text.append(f"{info.get('id', 'Unknown')}\n")
+
+        info_text.append("Name: ", style="bold")
+        info_text.append(f"{info.get('name', 'Unknown')}\n")
+
+        info_text.append("Namespace: ", style="bold")
+        info_text.append(f"{info.get('namespace', 'Unknown')}\n")
+
+        info_text.append("Project ID: ", style="bold")
+        info_text.append(f"{info.get('project_id', 'Unknown')}\n")
+
+        info_text.append("Project name: ", style="bold")
+        info_text.append(f"{info.get('project_name', 'Unknown')}\n")
+
+        info_text.append("Owner email: ", style="bold")
+        info_text.append(f"{info.get('owner_email', 'Unknown')}\n")
+
+        info_text.append("Allocations count: ", style="bold")
+        info_text.append(f"{len(allocations)}")
+
+        console = Console()
+        console.print(Panel(info_text, title="Workspace Info"))
+
+        allocations_table = Table(title="Workspace Allocations")
+        allocations_table.add_column("Allocation ID", style="cyan")
+        allocations_table.add_column("Name", style="magenta")
+        allocations_table.add_column("Cluster key", style="yellow")
+        allocations_table.add_column("Cluster name", style="green")
+
+        for allocation in allocations:
+            allocations_table.add_row(
+                allocation.get('id', ''),
+                allocation.get('name', ''),
+                allocation.get('cluster_key', ''),
+                allocation.get('cluster_name') or '',
+            )
+
+        console.print(allocations_table)
+
+    @staticmethod
+    def _resource_gpu_family(instance_type_name):
+        upper_name = instance_type_name.upper()
+        if 'H100' in upper_name or 'A100+' in upper_name:
+            return 'H100(A100+)'
+        if 'V100' in upper_name:
+            return 'V100'
+        if 'A100' in upper_name:
+            vram_gb = CloudRuAPIClient._resource_gpu_vram_gb(instance_type_name)
+            if vram_gb == 40:
+                return 'A100 40GB'
+            return 'A100 80GB'
+        return 'CPU'
+
+    @staticmethod
+    def _resource_gpu_count(instance_type_name):
+        match = re.search(r'(\d+)\s*GPU', instance_type_name, flags=re.IGNORECASE)
+        return int(match.group(1)) if match else 0
+
+    @staticmethod
+    def _resource_gpu_vram_gb(instance_type_name):
+        upper_name = instance_type_name.upper()
+        if 'A100+' in upper_name or 'H100' in upper_name:
+            return 80
+        if 'V100' in upper_name:
+            return 32
+
+        match = re.search(r'A100\s*(\d+)\s*GB', upper_name)
+        if not match:
+            match = re.search(r'TESLA\s*A100\s*(\d+)\s*GB', upper_name)
+        if match:
+            return int(match.group(1))
+        return 0
+
+    @staticmethod
+    def _resource_ram_gb(instance_type_name):
+        match = re.search(r'(\d+)\s*(?:GB|Gb)\s*RAM', instance_type_name, flags=re.IGNORECASE)
+        return int(match.group(1)) if match else 0
+
+    @staticmethod
+    def _resource_cpu_count(instance_type_name):
+        match = re.search(r'(\d+(?:\.\d+)?)\s*(?:v)?CPU(?:-cores)?', instance_type_name, flags=re.IGNORECASE)
+        return float(match.group(1)) if match else 0.0
+
+    def instance_types(self, region=None, refresh_configs=False, table_width=160, return_data=False):
+        """Show supported instance types for selected region.
+
+        Args:
+            region (str, optional): Region key. If not set, uses workspace region or SR006.
+            refresh_configs (bool, optional): Force refresh of /configs cache.
+            table_width (int, optional): Console table width.
+            return_data (bool, optional): If True, returns parsed rows. Defaults to False.
+
+        Returns:
+            list[dict] | None: Sorted rows with instance type info when return_data=True.
+        """
+        self._load_instance_types_cache(refresh=refresh_configs, cluster_type='MT')
+
+        region_key = region or self._default_region_from_workspace()
+
+        if not self._configs_cache:
+            console = Console(width=table_width)
+            console.print(Panel('Unable to load configs.', title='Instance Types'))
+            return []
+
+        selected_region = None
+        for region_data in self._configs_cache.get('regions', []):
+            if region_data.get('key') == region_key:
+                selected_region = region_data
+                break
+
+        console = Console(width=table_width)
+        if selected_region is None:
+            console.print(Panel(f'Region {region_key} was not found in /configs response.', title='Instance Types'))
+            return []
+
+        rows = []
+        for instance in selected_region.get('instances_types', []):
+            instance_type = instance.get('key')
+            instance_name = instance.get('name', '')
+            if not instance_type:
+                continue
+
+            gpu_family = self._resource_gpu_family(instance_name)
+            gpu_count = self._resource_gpu_count(instance_name)
+            ram_gb = self._resource_ram_gb(instance_name)
+            cpu_count = self._resource_cpu_count(instance_name)
+
+            if (ram_gb == 0 or cpu_count == 0.0) and instance.get('resource'):
+                limits = instance.get('resource', {}).get('limits', {})
+                memory = limits.get('memory', '')
+                cpu = limits.get('cpu', '')
+                mem_match = re.match(r'^(\d+)', str(memory))
+                if mem_match and ram_gb == 0:
+                    ram_gb = int(mem_match.group(1))
+                try:
+                    if cpu_count == 0.0:
+                        cpu_count = float(cpu)
+                except (TypeError, ValueError):
+                    pass
+
+            rows.append({
+                'region': region_key,
+                'instance_type': instance_type,
+                'instance_name': instance_name,
+                'gpu_family': gpu_family,
+                'gpu_count': gpu_count,
+                'cpu_count': cpu_count,
+                'ram_gb': ram_gb,
+            })
+
+        family_order = {
+            'H100(A100+)': 0,
+            'A100 80GB': 1,
+            'A100 40GB': 2,
+            'V100': 3,
+            'CPU': 4,
+        }
+
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                family_order.get(row['gpu_family'], 99),
+                row['gpu_count'],
+                row['ram_gb'],
+                row['cpu_count'],
+                row['instance_name'],
+            ),
+        )
+
+        table = Table(title=f'Instance Types (Region: {region_key})')
+        table.add_column('region', style='yellow')
+        table.add_column('GPU Type', style='yellow')
+        table.add_column('GPUs', justify='center')
+        table.add_column('CPU', justify='right')
+        table.add_column('RAM (GB)', justify='right')
+        table.add_column('instance_type', style='cyan')
+        table.add_column('Instance Name', style='magenta', overflow='fold')
+
+        for row in rows:
+            cpu_value = str(int(row['cpu_count'])) if row['cpu_count'].is_integer() else str(row['cpu_count'])
+            table.add_row(
+                row['region'],
+                row['gpu_family'],
+                str(row['gpu_count']),
+                cpu_value,
+                str(row['ram_gb']),
+                row['instance_type'],
+                row['instance_name'],
+            )
+
+        if rows:
+            console.print(table)
+        else:
+            console.print(Panel(f'No instance types found for region {region_key}.', title='Instance Types'))
+
+        if return_data:
+            return rows
+        return None
+
+    def available_resources(self, allocation_id=None, only_available=False, refresh_workspace=False, table_width=160,
+                            return_data=False, source='auto'):
+        """Show current allocation resource availability in sorted rich tables.
+
+        Args:
+            allocation_id (str, optional): Allocation ID. If not provided, use all current workspace allocations.
+            only_available (bool, optional): Show only rows with available > 0. Defaults to False.
+            refresh_workspace (bool, optional): Refresh workspace info when resolving allocation automatically.
+            table_width (int, optional): Console table width. Defaults to 160.
+            return_data (bool, optional): If True, returns parsed rows by allocation. Defaults to False.
+            source (str, optional): Data source strategy:
+                - 'auto': try instance_types/{region}/available first, fallback to allocations endpoint
+                - 'instance_types_available': use only /instance_types/{region}/available
+                - 'allocations_instance_types_availability': use only /allocations/{id}/instance_types_availability
+
+        Returns:
+            dict[str, list[dict]] | None: Sorted rows by allocation when return_data=True.
+        """
+        valid_sources = {'auto', 'instance_types_available', 'allocations_instance_types_availability'}
+        if source not in valid_sources:
+            raise ValueError(f"Invalid source={source!r}. Use one of: {sorted(valid_sources)}")
+
+        console = Console(width=table_width)
+
+        if refresh_workspace or not self._workspace_allocations_cache:
+            self.get_workspace_info(refresh=refresh_workspace)
+
+        allocation_meta_by_id = {
+            allocation.get('id'): {
+                'region': allocation.get('cluster_key'),
+                'name': allocation.get('name'),
+            }
+            for allocation in self._workspace_allocations_cache
+            if allocation.get('id')
+        }
+
+        self._load_instance_types_cache(refresh=False, cluster_type='MT')
+
+        if allocation_id is None:
+            if not self._workspace_allocations_cache:
+                console.print(Panel('No allocations found for current workspace.', title='Available Resources'))
+                return {} if return_data else None
+
+            allocation_ids = [allocation.get('id') for allocation in self._workspace_allocations_cache if allocation.get('id')]
+            if not allocation_ids:
+                console.print(Panel('No valid allocation IDs found in workspace.', title='Available Resources'))
+                return {} if return_data else None
+        else:
+            allocation_ids = [allocation_id]
+
+        all_results = {}
+
+        for current_allocation_id in allocation_ids:
+            if not current_allocation_id:
+                console.print(Panel('Allocation ID is empty. Provide allocation_id explicitly.', title='Available Resources'))
+                continue
+
+            allocation_meta = allocation_meta_by_id.get(current_allocation_id, {})
+            allocation_region = allocation_meta.get('region')
+            allocation_name = allocation_meta.get('name')
+            row_region = allocation_region or 'Unknown'
+
+            normalized = []
+            endpoint_errors = []
+
+            use_new_endpoint = source in {'auto', 'instance_types_available'}
+            use_old_endpoint = source in {'auto', 'allocations_instance_types_availability'}
+
+            if use_new_endpoint:
+                if allocation_region and allocation_name:
+                    new_data = self._get_instance_types_available(allocation_region, allocation_name)
+                    rows = new_data.get('instance_types', []) if isinstance(new_data, dict) else None
+                    if isinstance(rows, list):
+                        for row in rows:
+                            instance_name = row.get('name', '')
+                            instance_type = row.get('key')
+                            available = int(row.get('count', 0))
+                            normalized.append({
+                                'region': row_region,
+                                'instance_type': instance_type,
+                                'instance_name': instance_name,
+                                'available': available,
+                                'gpu_family': self._resource_gpu_family(instance_name),
+                                'gpu_count': self._resource_gpu_count(instance_name),
+                                'ram_gb': self._resource_ram_gb(instance_name),
+                                'cpu_count': self._resource_cpu_count(instance_name),
+                            })
+                    else:
+                        endpoint_errors.append(new_data)
+                else:
+                    endpoint_errors.append({
+                        'error': 'Cannot call instance_types_available without allocation name/region',
+                        'allocation_id': current_allocation_id,
+                    })
+
+            if not normalized and use_old_endpoint:
+                old_data = self._get_allocation_instance_types_availability(current_allocation_id)
+                if isinstance(old_data, list):
+                    for row in old_data:
+                        instance_name = row.get('instance_type', '')
+                        available = int(row.get('available', 0))
+                        instance_type = self._resolve_instance_type_key(instance_name, region_key=allocation_region)
+                        normalized.append({
+                            'region': row_region,
+                            'instance_type': instance_type,
+                            'instance_name': instance_name,
+                            'available': available,
+                            'gpu_family': self._resource_gpu_family(instance_name),
+                            'gpu_count': self._resource_gpu_count(instance_name),
+                            'ram_gb': self._resource_ram_gb(instance_name),
+                            'cpu_count': self._resource_cpu_count(instance_name),
+                        })
+                else:
+                    endpoint_errors.append(old_data)
+
+            if not normalized and endpoint_errors:
+                console.print(Panel(str(endpoint_errors[-1]), title=f'Available Resources Error ({current_allocation_id})'))
+                all_results[current_allocation_id] = []
+                continue
+
+            if only_available:
+                normalized = [row for row in normalized if row['available'] > 0]
+
+            family_order = {
+                'H100(A100+)': 0,
+                'A100 80GB': 1,
+                'A100 40GB': 2,
+                'V100': 3,
+                'CPU': 4,
+            }
+
+            normalized = sorted(
+                normalized,
+                key=lambda row: (
+                    family_order.get(row['gpu_family'], 99),
+                    row['gpu_count'],
+                    row['ram_gb'],
+                    row['cpu_count'],
+                    -row['available'],
+                    row['instance_name'],
+                )
+            )
+
+            table = Table(title=f'Available Resources (Allocation: {current_allocation_id})')
+            table.add_column('region', style='yellow')
+            table.add_column('GPU Type', style='yellow')
+            table.add_column('GPUs', justify='center')
+            table.add_column('CPU', justify='right')
+            table.add_column('RAM (GB)', justify='right')
+            table.add_column('Available', justify='right', style='green')
+            table.add_column('instance_type', style='cyan')
+            table.add_column('Instance Name', style='magenta', overflow='fold')
+
+            for row in normalized:
+                cpu_value = str(int(row['cpu_count'])) if row['cpu_count'].is_integer() else str(row['cpu_count'])
+                table.add_row(
+                    row['region'],
+                    row['gpu_family'],
+                    str(row['gpu_count']),
+                    cpu_value,
+                    str(row['ram_gb']),
+                    str(row['available']),
+                    row['instance_type'] or '',
+                    row['instance_name'],
+                )
+
+            if normalized:
+                console.print(table)
+            else:
+                message = 'No rows to display.'
+                if only_available:
+                    message = 'No currently available resources (all rows have available=0).'
+                console.print(Panel(message, title=f'Available Resources (Allocation: {current_allocation_id})'))
+
+            all_results[current_allocation_id] = normalized
+
+        if return_data:
+            return all_results
+        return None
 
     def job_status(self, job_id):
         """Get human readable status information for a job
