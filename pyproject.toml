@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudru-utils"
+version = "0.1.0"
+description = "Cloud.ru API helpers and CLI for jobs monitoring"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests",
+  "rich",
+  "typer>=0.12",
+]
+
+[project.scripts]
+cloudru = "cloudru_cli:main"
+
+[tool.setuptools]
+py-modules = ["cloudru_utils", "cloudru_config", "cloudru_cli"]

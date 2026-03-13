@@ -1,9 +1,8 @@
 try:
     import client_lib
+    CLIENT_LIB_AVAILABLE = True
 except ImportError:
-    print("client_lib is not available. Make sure you have client_lib installed.")
     CLIENT_LIB_AVAILABLE = False
-CLIENT_LIB_AVAILABLE = True
 
 import contextlib
 import io
@@ -109,7 +108,7 @@ class CloudRuAPIClient:
 
     STATUS_STYLES = {
         'Running': 'green',
-        'Failed': 'red', 
+        'Failed': 'red',
         'Terminated': 'red',
         'Stopped': 'red',
         'Pending': 'yellow',
@@ -117,7 +116,16 @@ class CloudRuAPIClient:
         'Succeeded': 'cyan',
         }
 
-    def __init__(self, client_id, client_secret, x_api_key=None, x_workspace_id=None):
+    def __init__(
+        self,
+        client_id,
+        client_secret,
+        x_api_key=None,
+        x_workspace_id=None,
+        access_token=None,
+        access_token_expires_at=None,
+        token_persist_callback=None,
+    ):
         """
         how to get client_id and client_secret:
         https://cloud.ru/docs/console_api/ug/topics/guides__api_key
@@ -144,6 +152,16 @@ class CloudRuAPIClient:
         self._configs_cache = None
         self._instance_types_by_region_cache = {}
         self._instance_types_normalized_by_region_cache = {}
+        self._token_persist_callback = token_persist_callback
+
+        if access_token:
+            self.access_token = access_token
+        if access_token_expires_at is not None:
+            try:
+                self.access_token_expires_at = float(access_token_expires_at)
+            except (TypeError, ValueError):
+                self.access_token_expires_at = 0
+
         self._refresh_token()
 
     def __repr__(self):
@@ -170,23 +188,74 @@ class CloudRuAPIClient:
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
             },
-            json={'client_id': self.client_id, 'client_secret': self.client_secret}
+            json={'client_id': self.client_id, 'client_secret': self.client_secret},
+            timeout=30,
         )
-        return response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Service auth failed (HTTP {response.status_code}) with non-JSON response"
+            ) from exc
 
-    def _refresh_token(self):
+        if response.status_code >= 400:
+            raise RuntimeError(f"Service auth failed (HTTP {response.status_code}): {data}")
+
+        return data
+
+    def _persist_token_cache(self):
+        if not self._token_persist_callback:
+            return
+        try:
+            self._token_persist_callback(self.access_token, self.access_token_expires_at)
+        except Exception:
+            pass
+
+    def _refresh_token(self, force=False):
         """Refresh access token only when needed based on expiration time"""
         current_time = time.time()
 
         # check if we have a valid token that is not close to expiring
         # if token is about to expire in 60 seconds, refresh it
-        if hasattr(self, 'access_token_expires_at') and current_time < self.access_token_expires_at - 60:
+        if not force and hasattr(self, 'access_token_expires_at') and current_time < self.access_token_expires_at - 60:
             return
         # get new access_token
         auth_response = self._service_auth()
-        self.access_token = auth_response['token']['access_token']
-        expires_in = auth_response['token']['expires_in']
+        token_data = auth_response.get('token') if isinstance(auth_response, dict) else None
+        if not token_data or 'access_token' not in token_data:
+            raise RuntimeError(
+                "Service auth response does not contain access token. "
+                "Check client_id/client_secret. "
+                f"Response: {auth_response}"
+            )
+
+        self.access_token = token_data['access_token']
+        expires_in = token_data.get('expires_in', 3600)
+        try:
+            expires_in = float(expires_in)
+        except (TypeError, ValueError):
+            expires_in = 3600
         self.access_token_expires_at = current_time + expires_in
+        self._persist_token_cache()
+
+    def _request_with_auth(self, method, url, headers=None, retry_on_auth=True, timeout=30, **kwargs):
+        self._refresh_token()
+        req_headers = dict(headers or {})
+        if 'authorization' in req_headers:
+            req_headers['authorization'] = self.access_token
+        if 'Authorization' in req_headers:
+            req_headers['Authorization'] = f'Bearer {self.access_token}'
+
+        response = requests.request(method, url, headers=req_headers, timeout=timeout, **kwargs)
+        if retry_on_auth and response.status_code in (401, 403):
+            self._refresh_token(force=True)
+            if 'authorization' in req_headers:
+                req_headers['authorization'] = self.access_token
+            if 'Authorization' in req_headers:
+                req_headers['Authorization'] = f'Bearer {self.access_token}'
+            response = requests.request(method, url, headers=req_headers, timeout=timeout, **kwargs)
+
+        return response
 
     def _get_jobs(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
         """Get all jobs in workspace for specified region
@@ -219,8 +288,25 @@ class CloudRuAPIClient:
             'status': status,
         }
 
-        response = requests.get(url, headers=headers, params=params)
-        jobs_data = response.json()
+        response = self._request_with_auth('get', url, headers=headers, params=params)
+        try:
+            jobs_data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Failed to decode jobs response for region={region} (HTTP {response.status_code})"
+            ) from exc
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Jobs request failed for region={region} (HTTP {response.status_code}): {jobs_data}"
+            )
+
+        if not isinstance(jobs_data, dict) or 'jobs' not in jobs_data:
+            raise RuntimeError(
+                f"Unexpected jobs response format for region={region}. "
+                f"Expected object with 'jobs'. Got: {jobs_data}"
+            )
+
         sorted_jobs = sorted(jobs_data['jobs'], key=lambda x: x['created_dt'], reverse=True)
         return sorted_jobs
 
@@ -243,7 +329,7 @@ class CloudRuAPIClient:
             'x-workspace-id': self.x_workspace_id,
         }
 
-        response = requests.get(url, headers=headers)
+        response = self._request_with_auth('get', url, headers=headers)
         return response.json()
 
     def _get_workspace_info(self, workspace_id=None):
@@ -264,7 +350,7 @@ class CloudRuAPIClient:
             'authorization': self.access_token,
         }
 
-        response = requests.get(url, headers=headers)
+        response = self._request_with_auth('get', url, headers=headers)
         return response.json()
 
     def _get_allocation_instance_types_availability(self, allocation_id):
@@ -286,7 +372,7 @@ class CloudRuAPIClient:
             'authorization': self.access_token,
         }
 
-        response = requests.get(url, headers=headers)
+        response = self._request_with_auth('get', url, headers=headers)
         return response.json()
 
     def _get_instance_types_available(self, region, allocation_name):
@@ -310,7 +396,7 @@ class CloudRuAPIClient:
         }
 
         params = {'allocation_name': allocation_name}
-        response = requests.get(url, headers=headers, params=params)
+        response = self._request_with_auth('get', url, headers=headers, params=params)
         return response.json()
 
     def _get_configs(self, cluster_type='MT'):
@@ -326,7 +412,7 @@ class CloudRuAPIClient:
         }
 
         params = {'cluster_type': cluster_type}
-        response = requests.get(url, headers=headers, params=params)
+        response = self._request_with_auth('get', url, headers=headers, params=params)
         return response.json()
 
     @staticmethod
@@ -430,9 +516,8 @@ class CloudRuAPIClient:
         }
 
         while True:
-            self._refresh_token()
             params = {'tail': tail, 'verbose': verbose, 'region': region}
-            response = requests.get(url, headers=headers, params=params, stream=True)
+            response = self._request_with_auth('get', url, headers=headers, params=params, stream=True)
             try:
                 for line in response.iter_lines():
                     if line:
@@ -524,7 +609,6 @@ class CloudRuAPIClient:
         Returns:
             dict: Response from job submission API endpoint
         """
-        self._refresh_token()
         url = f'{self.API_URL}/jobs'
 
         headers = {
@@ -572,7 +656,7 @@ class CloudRuAPIClient:
         if health_params:
             payload["health_params"] = health_params
 
-        response = requests.post(url, headers=headers, json=payload)
+        response = self._request_with_auth('post', url, headers=headers, json=payload)
         return response.json()
 
     def kill_job(self, job_id, region='SR006'):
@@ -585,7 +669,6 @@ class CloudRuAPIClient:
         Returns:
             dict: Response from job deletion API endpoint
         """
-        self._refresh_token()
         url = f'{self.API_URL}/jobs/{job_id}'
 
         headers = {
@@ -597,7 +680,7 @@ class CloudRuAPIClient:
 
         params = {'region': region}
 
-        response = requests.delete(url, headers=headers, params=params)
+        response = self._request_with_auth('delete', url, headers=headers, params=params)
         return response.json()
 
     def job_logs(self, job_id, tail=100, verbose=False, region='SR006'):

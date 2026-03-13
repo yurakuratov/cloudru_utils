@@ -45,6 +45,15 @@ pip install requests rich
 
 If you run on Cloud.ru and want `client_lib` features, make sure `client_lib` is available in your environment.
 
+To install CLI command locally:
+
+```bash
+pip install -e .
+cloudru --help
+# install shell completion (Typer)
+cloudru --install-completion
+```
+
 ## Authentication and workspace
 
 `CloudRuAPIClient` needs:
@@ -80,6 +89,33 @@ cloud_client = CloudRuAPIClient(
 ```
 
 ## Typical usage
+
+## CLI usage
+
+Initialize profile (AWS CLI style files in `~/.cloudru`):
+
+```bash
+cloudru init --profile default
+```
+
+Main commands (monitoring + control, no submit command yet):
+
+```bash
+cloudru workspace info
+cloudru instance-types --region SR006
+cloudru resources available --only-available
+cloudru resources available --source instance_types_available
+cloudru jobs list --status Running,Pending --n 20
+cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
+cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Config files:
+- `~/.cloudru/credentials` - `client_id`, `client_secret`, `x_api_key`, `x_workspace_id`
+- `~/.cloudru/config` - defaults like `region`, `source`
+- `~/.cloudru/token_cache` - cached access token per profile
+- profile selection: `--profile` or `CLOUDRU_PROFILE`
 
 ### List jobs
 
