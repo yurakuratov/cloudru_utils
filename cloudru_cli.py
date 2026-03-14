@@ -3,6 +3,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import shlex
 import traceback
 from typing import Optional
 from datetime import datetime
@@ -131,18 +132,24 @@ def _normalize_status_list(values: list[str], arg_name: str) -> list[str]:
     return normalized
 
 
-def _load_job_yaml(path: str) -> dict:
+def _load_job_yaml(path: str) -> tuple[dict, dict]:
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
     if not isinstance(data, dict):
         raise RuntimeError("YAML file must contain an object at top level")
 
+    setup_cfg = data.get("setup", {})
+    if setup_cfg is None:
+        setup_cfg = {}
+    if not isinstance(setup_cfg, dict):
+        raise RuntimeError("YAML key 'setup' must contain an object")
+
     job_cfg = data.get("job", data)
     if not isinstance(job_cfg, dict):
         raise RuntimeError("YAML key 'job' must contain an object")
 
-    return job_cfg
+    return setup_cfg, job_cfg
 
 
 def _parse_env_overrides(values: list[str]) -> dict:
@@ -156,6 +163,77 @@ def _parse_env_overrides(values: list[str]) -> dict:
             raise RuntimeError(f"Invalid --env value '{item}'. Empty key")
         env[key] = value
     return env
+
+
+def _parse_pre_commands(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if not isinstance(item, str):
+                raise RuntimeError("setup.pre_command list must contain strings")
+            if item.strip():
+                out.append(item)
+        return out
+    raise RuntimeError("setup.pre_command must be string or list of strings")
+
+
+def _build_bootstrap_script(setup_cfg: dict, main_script: str) -> str:
+    shell_init = setup_cfg.get("shell_init")
+    conda_env = setup_cfg.get("conda_env")
+    check_hf_auth = bool(setup_cfg.get("check_hf_auth", False))
+    workdir = setup_cfg.get("workdir")
+    print_pwd = bool(setup_cfg.get("print_pwd", False))
+    pre_commands = _parse_pre_commands(setup_cfg.get("pre_command"))
+
+    steps = []
+
+    if shell_init:
+        steps.append(shell_init)
+    elif conda_env:
+        steps.append('eval "$(conda shell.bash hook)"')
+
+    if conda_env:
+        steps.append(f"conda activate {shlex.quote(str(conda_env))}")
+
+    steps.extend(pre_commands)
+
+    if check_hf_auth:
+        steps.append("hf auth whoami")
+
+    if workdir:
+        steps.append(f"cd {shlex.quote(str(workdir))}")
+
+    if print_pwd:
+        steps.append('echo "Current directory: $(pwd)"')
+
+    steps.append(main_script)
+
+    # Keep command one-line to avoid API rejecting multiline/special script payloads.
+    # Chain commands with && so setup failures stop execution before running main script.
+    inner_command = " && ".join(steps)
+    return f"bash -c {shlex.quote(inner_command)}"
+
+
+def _should_use_bootstrap(setup_cfg: dict) -> bool:
+    shell_init = setup_cfg.get("shell_init")
+    conda_env = setup_cfg.get("conda_env")
+    workdir = setup_cfg.get("workdir")
+    check_hf_auth = bool(setup_cfg.get("check_hf_auth", False))
+    print_pwd = bool(setup_cfg.get("print_pwd", False))
+    pre_commands = _parse_pre_commands(setup_cfg.get("pre_command"))
+
+    return any([
+        bool(shell_init),
+        bool(conda_env),
+        bool(workdir),
+        check_hf_auth,
+        print_pwd,
+        len(pre_commands) > 0,
+    ])
 
 
 @app.callback()
@@ -376,6 +454,11 @@ def cmd_jobs_submit(
     processes_per_worker: Optional[int] = typer.Option(None, "--processes-per-worker", min=1),
     conda_env: Optional[str] = typer.Option(None, "--conda-env"),
     env: Optional[list[str]] = typer.Option(None, "--env", help="Repeatable KEY=VALUE override"),
+    workdir: Optional[str] = typer.Option(None, "--workdir"),
+    shell_init: Optional[str] = typer.Option(None, "--shell-init"),
+    check_hf_auth: Optional[bool] = typer.Option(None, "--check-hf-auth/--no-check-hf-auth"),
+    pre_command: Optional[list[str]] = typer.Option(None, "--pre-command", help="Repeatable setup command"),
+    no_bootstrap: bool = typer.Option(False, "--no-bootstrap", help="Submit raw script without setup wrapper"),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON response"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print merged config and do not submit"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -385,7 +468,7 @@ def cmd_jobs_submit(
     try:
         client, cfg = _build_client(_resolve_profile(ctx, profile))
 
-        raw_job_cfg = _load_job_yaml(file)
+        setup_cfg, raw_job_cfg = _load_job_yaml(file)
         submit_kwargs = {k: v for k, v in raw_job_cfg.items() if k in SUBMIT_JOB_ALLOWED_FIELDS}
 
         if "region" not in submit_kwargs or not submit_kwargs.get("region"):
@@ -415,14 +498,36 @@ def cmd_jobs_submit(
             env_variables.update(env_overrides)
             submit_kwargs["env_variables"] = env_variables
 
+        setup_effective = dict(setup_cfg)
+        if conda_env is not None:
+            setup_effective["conda_env"] = conda_env
+        if workdir is not None:
+            setup_effective["workdir"] = workdir
+        if shell_init is not None:
+            setup_effective["shell_init"] = shell_init
+        if check_hf_auth is not None:
+            setup_effective["check_hf_auth"] = check_hf_auth
+        if pre_command is not None and len(pre_command) > 0:
+            setup_effective["pre_command"] = pre_command
+
         required = ["script", "base_image", "instance_type", "region"]
         missing = [k for k in required if not submit_kwargs.get(k)]
         if missing:
             raise RuntimeError(f"Missing required submit fields: {', '.join(missing)}")
 
+        raw_script = submit_kwargs["script"]
+        final_script = raw_script
+        if not no_bootstrap and _should_use_bootstrap(setup_effective):
+            final_script = _build_bootstrap_script(setup_effective, final_script)
+        submit_kwargs["script"] = final_script
+
         if dry_run:
+            dry_run_job = dict(submit_kwargs)
+            dry_run_job["script"] = raw_script
             typer.echo("Dry run payload:")
-            typer.echo(yaml.safe_dump({"job": submit_kwargs}, sort_keys=False))
+            typer.echo(yaml.safe_dump({"setup": setup_effective, "job": dry_run_job}, sort_keys=False))
+            typer.echo("Command to run:")
+            typer.echo(final_script)
             return
 
         result = client.submit_job(**submit_kwargs)

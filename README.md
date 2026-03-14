@@ -60,25 +60,33 @@ cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
 cloudru jobs submit -f job.yaml --dry-run
 cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
+cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
 cloudru jobs submit -f job.yaml --json
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-Example `job.yaml` for CLI submit:
+Example `job.yaml` for CLI submit (setup + run are submitted as one job command):
 
 ```yaml
+setup:
+  conda_env: "/home/user/your/env"
+  workdir: "/home/user/project"
+  # run hf auth whoami
+  check_hf_auth: true
+  pre_command:
+    - "export WANDB_MODE=offline"
+
 job:
-  script: "bash /home/jovyan/project/run.sh"
+  script: "./scripts/run.sh"
   base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
   instance_type: "a100plus.1gpu.80vG.12C.96G"
   region: "SR006"
   job_type: "binary"
-  job_desc: "quick smoke run"
+  job_desc: "quick run"
   n_workers: 1
   processes_per_worker: 1
-  conda_env: "/home/jovyan/your/env"
   env_variables:
     HF_HOME: "/home/jovyan/data/.cache/huggingface"
 ```

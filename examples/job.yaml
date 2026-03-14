@@ -1,0 +1,30 @@
+setup:
+  # commands will be executed in this order (shell_init, conda_env, pre_command, check_hf_auth, workdir, print_pwd)
+  # Optional: if omitted and conda_env is set, CLI uses:
+  # eval "$(conda shell.bash hook)"
+  shell_init: 'eval "$(conda shell.bash hook)"'
+  # Activate this conda env before running the job command
+  conda_env: "/home/jovyan/kuratov/envs/py311_pt2.6_cu12.4"
+  # Optional custom setup commands (single string or list)
+  pre_command:
+    - "export MYENVVAR=hey_there"
+  # Optional HF auth check (hf auth whoami)
+  check_hf_auth: true
+  # cd to this directory
+  workdir: "/home/jovyan/kuratov/data/test_time_gd"
+  # Off by default; set true if you want to check "Current directory: ..."
+  print_pwd: true
+
+job:
+  script: "./examples/example.sh"
+  base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
+  instance_type: "a100plus.1gpu.80vG.12C.96G"
+  region: "SR006"
+  job_type: "binary"
+  job_desc: "test job"
+  n_workers: 1
+  processes_per_worker: 1
+  conda_env: "/home/jovyan/kuratov/envs/py311_pt2.6_cu12.4"
+  env_variables:
+    HF_HOME: /home/jovyan/kuratov/data/.cache/huggingface
+    HOME: /home/jovyan/kuratov
