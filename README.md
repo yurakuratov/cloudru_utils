@@ -2,6 +2,8 @@
 
 Tools for working with Cloud.ru training/HPC jobs from CLI and Python.
 
+Disclaimer: This is an unofficial tool, not developed, supported, or endorsed by Cloud.ru.
+
 At a glance:
 - `cloudru` CLI is built for day-to-day operations: initialize profiles, inspect workspace info, list/filter jobs, check status/logs, view supported/available instance types, and stop jobs.
 - `CloudRuAPIClient` provides the same monitoring/control workflows programmatically and adds job submission (`submit_job`) for automation.
