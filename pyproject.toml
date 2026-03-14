@@ -12,6 +12,7 @@ dependencies = [
   "requests",
   "rich",
   "typer>=0.12",
+  "pyyaml",
 ]
 
 [project.scripts]

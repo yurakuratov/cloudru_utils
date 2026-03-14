@@ -58,9 +58,29 @@ cloudru resources available
 cloudru resources available --all
 cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
+cloudru jobs submit -f job.yaml --dry-run
+cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
+cloudru jobs submit -f job.yaml --json
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Example `job.yaml` for CLI submit:
+
+```yaml
+job:
+  script: "bash /home/jovyan/project/run.sh"
+  base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
+  instance_type: "a100plus.1gpu.80vG.12C.96G"
+  region: "SR006"
+  job_type: "binary"
+  job_desc: "quick smoke run"
+  n_workers: 1
+  processes_per_worker: 1
+  conda_env: "/home/jovyan/your/env"
+  env_variables:
+    HF_HOME: "/home/jovyan/data/.cache/huggingface"
 ```
 
 Config files:
@@ -152,7 +172,7 @@ cloud_client.kill_job(job_id, region="SR006")
 
 ## Notes
 
-- CLI currently focuses on monitoring/control workflows (no CLI submit command yet).
+- CLI supports monitoring/control workflows and YAML-based job submission.
 - `submit_job` exposes many API parameters; validate your runtime/env/image settings for your workspace.
 - If `client_lib` is not installed, `show_current_jobs` is unavailable, but `CloudRuAPIClient` still works with explicit workspace headers.
 

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import traceback
 from typing import Optional
+from datetime import datetime
 
 import typer
+import yaml
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
 from cloudru_config import (
     CONFIG_PATH,
@@ -22,6 +28,31 @@ from cloudru_utils import CloudRuAPIClient
 
 DEFAULT_SOURCE = "auto"
 VALID_SOURCES = ["auto", "instance_types_available", "allocations_instance_types_availability"]
+
+SUBMIT_JOB_ALLOWED_FIELDS = {
+    "script",
+    "base_image",
+    "instance_type",
+    "region",
+    "job_type",
+    "n_workers",
+    "processes_per_worker",
+    "job_desc",
+    "internet",
+    "conda_env",
+    "max_retry",
+    "priority_class",
+    "checkpoint_dir",
+    "flags",
+    "env_variables",
+    "pytorch_use_env",
+    "elastic_min_workers",
+    "elastic_max_workers",
+    "elastic_max_restarts",
+    "spark_executor_memory",
+    "health_params",
+    "stop_timer",
+}
 
 app = typer.Typer(help="Cloud.ru jobs helper CLI", no_args_is_help=True, add_completion=True)
 workspace_app = typer.Typer(help="Workspace commands", no_args_is_help=True)
@@ -98,6 +129,33 @@ def _normalize_status_list(values: list[str], arg_name: str) -> list[str]:
                 raise RuntimeError(f"Unknown {arg_name} '{status}'. Valid values: {valid}")
             normalized.append(status_map[key])
     return normalized
+
+
+def _load_job_yaml(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise RuntimeError("YAML file must contain an object at top level")
+
+    job_cfg = data.get("job", data)
+    if not isinstance(job_cfg, dict):
+        raise RuntimeError("YAML key 'job' must contain an object")
+
+    return job_cfg
+
+
+def _parse_env_overrides(values: list[str]) -> dict:
+    env = {}
+    for item in values:
+        if "=" not in item:
+            raise RuntimeError(f"Invalid --env value '{item}'. Expected KEY=VALUE")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise RuntimeError(f"Invalid --env value '{item}'. Empty key")
+        env[key] = value
+    return env
 
 
 @app.callback()
@@ -300,6 +358,104 @@ def cmd_jobs_kill(
         target_region = region or cfg.get("region") or "SR006"
         result = client.kill_job(job_id, region=target_region)
         typer.echo(result)
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@jobs_app.command("submit")
+def cmd_jobs_submit(
+    ctx: typer.Context,
+    file: str = typer.Option(..., "-f", "--file", help="Path to YAML config with job settings"),
+    script: Optional[str] = typer.Option(None, "--script"),
+    base_image: Optional[str] = typer.Option(None, "--base-image"),
+    instance_type: Optional[str] = typer.Option(None, "--instance-type"),
+    region: Optional[str] = typer.Option(None, "--region"),
+    job_type: Optional[str] = typer.Option(None, "--job-type"),
+    job_desc: Optional[str] = typer.Option(None, "--job-desc"),
+    n_workers: Optional[int] = typer.Option(None, "--n-workers", min=1),
+    processes_per_worker: Optional[int] = typer.Option(None, "--processes-per-worker", min=1),
+    conda_env: Optional[str] = typer.Option(None, "--conda-env"),
+    env: Optional[list[str]] = typer.Option(None, "--env", help="Repeatable KEY=VALUE override"),
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON response"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print merged config and do not submit"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
+
+        raw_job_cfg = _load_job_yaml(file)
+        submit_kwargs = {k: v for k, v in raw_job_cfg.items() if k in SUBMIT_JOB_ALLOWED_FIELDS}
+
+        if "region" not in submit_kwargs or not submit_kwargs.get("region"):
+            submit_kwargs["region"] = cfg.get("region") or "SR006"
+
+        overrides = {
+            "script": script,
+            "base_image": base_image,
+            "instance_type": instance_type,
+            "region": region,
+            "job_type": job_type,
+            "job_desc": job_desc,
+            "n_workers": n_workers,
+            "processes_per_worker": processes_per_worker,
+            "conda_env": conda_env,
+        }
+        for key, value in overrides.items():
+            if value is not None:
+                submit_kwargs[key] = value
+
+        env_overrides = _parse_env_overrides(env or [])
+        if env_overrides:
+            env_variables = submit_kwargs.get("env_variables") or {}
+            if not isinstance(env_variables, dict):
+                raise RuntimeError("env_variables in YAML must be an object")
+            env_variables = dict(env_variables)
+            env_variables.update(env_overrides)
+            submit_kwargs["env_variables"] = env_variables
+
+        required = ["script", "base_image", "instance_type", "region"]
+        missing = [k for k in required if not submit_kwargs.get(k)]
+        if missing:
+            raise RuntimeError(f"Missing required submit fields: {', '.join(missing)}")
+
+        if dry_run:
+            typer.echo("Dry run payload:")
+            typer.echo(yaml.safe_dump({"job": submit_kwargs}, sort_keys=False))
+            return
+
+        result = client.submit_job(**submit_kwargs)
+        if as_json:
+            typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
+        console = Console()
+        if isinstance(result, dict) and result.get("job_name"):
+            status = str(result.get("status", "Unknown"))
+            status_style = CloudRuAPIClient.STATUS_STYLES.get(status.capitalize(), "white")
+
+            created_at = result.get("created_at")
+            created_str = "Unknown"
+            try:
+                if created_at is not None:
+                    created_str = datetime.fromtimestamp(float(created_at)).strftime("%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError, OSError):
+                created_str = str(created_at)
+
+            info = Text()
+            info.append("Job ID: ", style="bold")
+            info.append(f"{result.get('job_name')}\n")
+            info.append("Status: ", style="bold")
+            info.append(f"{status}\n", style=status_style)
+            info.append("Created: ", style="bold")
+            info.append(created_str)
+
+            console.print(Panel(info, title="Job Submitted"))
+            console.print(f"Next: cloudru jobs status {result.get('job_name')}")
+            console.print(f"Next: cloudru jobs logs {result.get('job_name')}")
+        else:
+            console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Submit Response"))
     except Exception as exc:
         _fail(exc, debug_mode)
 
