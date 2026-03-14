@@ -39,10 +39,10 @@ cloudru --install-completion
 
 # Check workspace and jobs
 cloudru workspace info
-cloudru jobs list --n 20 --status Running,Pending
+cloudru jobs list
 
 # See currently available resources
-cloudru resources available --only-available
+cloudru resources available
 ```
 
 ## CLI Usage
@@ -51,8 +51,10 @@ Main commands:
 
 ```bash
 cloudru workspace info
-cloudru instance-types --region SR006
-cloudru resources available --source instance_types_available
+cloudru resources instance-types --region SR006
+cloudru resources available
+cloudru resources available --all
+cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
@@ -144,7 +146,7 @@ cloud_client.kill_job(job_id, region="SR006")
 - `get_workspace_info(refresh=True)`
 - `workspace_info(refresh=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
-- `available_resources(allocation_id=None, only_available=False, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
+- `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
 
 ## Notes
 

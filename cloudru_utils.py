@@ -935,13 +935,13 @@ class CloudRuAPIClient:
             return rows
         return None
 
-    def available_resources(self, allocation_id=None, only_available=False, refresh_workspace=False, table_width=160,
+    def available_resources(self, allocation_id=None, only_available=True, refresh_workspace=False, table_width=160,
                             return_data=False, source='auto'):
         """Show current allocation resource availability in sorted rich tables.
 
         Args:
             allocation_id (str, optional): Allocation ID. If not provided, use all current workspace allocations.
-            only_available (bool, optional): Show only rows with available > 0. Defaults to False.
+            only_available (bool, optional): Show only rows with available > 0. Defaults to True.
             refresh_workspace (bool, optional): Refresh workspace info when resolving allocation automatically.
             table_width (int, optional): Console table width. Defaults to 160.
             return_data (bool, optional): If True, returns parsed rows by allocation. Defaults to False.

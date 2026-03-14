@@ -176,7 +176,7 @@ def cmd_workspace_info(
         _fail(exc, debug_mode)
 
 
-@app.command("instance-types")
+@resources_app.command("instance-types")
 def cmd_instance_types(
     ctx: typer.Context,
     region: Optional[str] = typer.Option(None, "--region"),
@@ -198,7 +198,7 @@ def cmd_instance_types(
 def cmd_available_resources(
     ctx: typer.Context,
     allocation_id: Optional[str] = typer.Option(None, "--allocation-id"),
-    only_available: bool = typer.Option(False, "--only-available"),
+    all_resources: bool = typer.Option(False, "--all", help="Show unavailable resources too"),
     refresh_workspace: bool = typer.Option(False, "--refresh-workspace"),
     table_width: int = typer.Option(160, "--table-width"),
     source: Optional[str] = typer.Option(None, "--source", case_sensitive=False),
@@ -214,7 +214,7 @@ def cmd_available_resources(
 
         client.available_resources(
             allocation_id=allocation_id,
-            only_available=only_available,
+            only_available=not all_resources,
             refresh_workspace=refresh_workspace,
             table_width=table_width,
             source=effective_source,
