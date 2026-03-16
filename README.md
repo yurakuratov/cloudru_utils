@@ -5,9 +5,9 @@ Tools for working with Cloud.ru training/HPC jobs from CLI and Python.
 Disclaimer: This is an unofficial tool, not developed, supported, or endorsed by Cloud.ru.
 
 At a glance:
-- `cloudru` CLI is built for day-to-day operations: initialize profiles, inspect workspace info, list/filter jobs, check status/logs, view supported/available instance types, and stop jobs.
-- `CloudRuAPIClient` provides the same monitoring/control workflows programmatically and adds job submission (`submit_job`) for automation.
-- The Python API is especially convenient in IPython/Jupyter notebooks for exploratory workflows, live monitoring, and quick iteration.
+- `cloudru` CLI is built for day-to-day workflows: submitting jobs, monitoring jobs/status/logs, and checking available/used resources and instance types.
+- `CloudRuAPIClient` provides the same workflows programmatically and is especially convenient in IPython/Jupyter notebooks for exploratory work and live monitoring.
+- The toolkit uses Cloud.ru public API and can be used from any machine, not only Cloud.ru-hosted machines (with valid credentials/workspace headers).
 - Toolkit includes profile-based credentials, per-profile token cache, and mapping from available resources to submit-ready `instance_type` values.
 
 ## Installation
@@ -29,6 +29,8 @@ Most job endpoints also require workspace headers:
 How to get credentials:
 - API key guide: https://cloud.ru/docs/console_api/ug/topics/guides__api_key
 - Workspace profile/dev func guide: https://cloud.ru/docs/aicloud/mlspace/concepts/guides/guides__profile/profile__develop-func
+
+This toolkit works from local laptops/servers as well as Cloud.ru machines.
 
 ## CLI Quick Start
 
