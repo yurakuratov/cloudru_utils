@@ -1,17 +1,23 @@
 setup:
   # commands will be executed in this order (shell_init, conda_env, pre_command, check_hf_auth, workdir, print_pwd)
+
   # Optional: if omitted and conda_env is set, CLI uses:
   # eval "$(conda shell.bash hook)"
-  shell_init: 'eval "$(conda shell.bash hook)"'
+  # shell_init: 'eval "$(conda shell.bash hook)"'
+
   # Activate this conda env before running the job command
-  conda_env: "/home/jovyan/kuratov/envs/py311_pt2.6_cu12.4"
+  # conda_env: "/home/jovyan/kuratov/envs/py311_pt2.6_cu12.4"
+
   # Optional custom setup commands (single string or list)
-  pre_command:
-    - "export MYENVVAR=hey_there"
-  # Optional HF auth check (hf auth whoami)
-  check_hf_auth: true
+  # pre_command:
+  #   - nvidia-smi
+  #   - "ln -s PATH_TO_DATA /home/user/project/data"
+
+  # # Optional HF auth check (hf auth whoami)
+  # check_hf_auth: true
+
   # cd to this directory
-  workdir: "/home/jovyan/kuratov/data/test_time_gd"
+  workdir: "/home/jovyan/kuratov/cloudru_utils"
   # Off by default; set true if you want to check "Current directory: ..."
   print_pwd: true
 
@@ -28,3 +34,4 @@ job:
   env_variables:
     HF_HOME: /home/jovyan/kuratov/data/.cache/huggingface
     HOME: /home/jovyan/kuratov
+    MYENVVAR: hey_there

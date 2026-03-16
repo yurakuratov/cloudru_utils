@@ -76,12 +76,16 @@ Example `job.yaml` for CLI submit (setup + run are submitted as one job command)
 
 ```yaml
 setup:
-  conda_env: "/home/user/your/env"
-  workdir: "/home/user/project"
-  # run hf auth whoami
+  # commands are executed in this order:
+  # shell_init -> conda_env -> pre_command -> check_hf_auth -> workdir -> print_pwd -> job.script
+  # optional; if omitted and conda_env is set, CLI uses: eval "$(conda shell.bash hook)"
+  shell_init: 'eval "$(conda shell.bash hook)"'
+  conda_env: "/home/jovyan/your/env"
+  workdir: "/home/jovyan/project"
   check_hf_auth: true
+  print_pwd: true
   pre_command:
-    - "export WANDB_MODE=offline"
+    - nvidia-smi
 
 job:
   script: "./scripts/run.sh"
@@ -95,6 +99,36 @@ job:
   env_variables:
     HF_HOME: "/home/jovyan/data/.cache/huggingface"
 ```
+
+### `setup` section behavior
+
+`setup` is optional. When present, setup steps and `job.script` are executed as one submitted job command.
+
+Execution order:
+1. `setup.shell_init`
+2. `setup.conda_env` activation
+3. `setup.pre_command` (string or list, in order)
+4. `setup.check_hf_auth` (`hf auth whoami`)
+5. `setup.workdir` (`cd ...`)
+6. `setup.print_pwd` (`echo "Current directory: $(pwd)"`)
+7. `job.script`
+
+Notes:
+- `print_pwd` default is `false`.
+- If `setup` is empty (and no setup CLI overrides), setup section is not used and `job.script` is submitted unchanged.
+- `cloudru jobs submit --dry-run` shows:
+  - merged payload with raw `job.script`
+  - `Command to run:` with the exact final command sent to API.
+- Full example with all setup fields: `examples/job.yaml`.
+
+Useful `setup.pre_command` examples:
+- `nvidia-smi`
+- `which python`
+- `python -V`
+- `ln -s PATH_TO_DATA /home/user/project/data`
+- `python -c "import torch; assert torch.cuda.is_available(), 'CUDA is not available'"`
+
+Use `job.env_variables` for static environment variables, and `setup.pre_command` for preparatory shell checks/actions.
 
 Config files:
 - `~/.cloudru/credentials` - `client_id`, `client_secret`, `x_api_key`, `x_workspace_id`
@@ -193,6 +227,10 @@ cloud_client.kill_job(job_id, region="SR006")
 - `submit_job` exposes many API parameters; validate your runtime/env/image settings for your workspace.
 - If `client_lib` is not installed, `show_current_jobs` is unavailable, but `CloudRuAPIClient` still works with explicit workspace headers.
 
-## Example notebook
+## Example script and job yaml:
+- `examples/example.sh`
+- `examples/job.yaml`
+
+## Example notebook (a bit outdated)
 
 - `examples/cloudru_utils_example.ipynb`
