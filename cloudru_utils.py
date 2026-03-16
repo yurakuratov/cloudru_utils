@@ -722,6 +722,18 @@ class CloudRuAPIClient:
     def workspace_allocations(self):
         return self._workspace_allocations_cache
 
+    def _workspace_title_label(self):
+        """Return human-readable workspace name for table titles."""
+        if self._workspace_info_cache is None:
+            try:
+                self.get_workspace_info(refresh=False)
+            except Exception:
+                return 'Unknown workspace'
+
+        info = self._workspace_info_cache or {}
+        workspace_name = info.get('name') or 'Unknown workspace'
+        return workspace_name
+
     def workspace_info(self, refresh=True):
         """Show human-readable workspace information in rich format.
 
@@ -962,6 +974,8 @@ class CloudRuAPIClient:
         if refresh_workspace or not self._workspace_allocations_cache:
             self.get_workspace_info(refresh=refresh_workspace)
 
+        workspace_label = self._workspace_title_label()
+
         allocation_meta_by_id = {
             allocation.get('id'): {
                 'region': allocation.get('cluster_key'),
@@ -1078,7 +1092,10 @@ class CloudRuAPIClient:
                 )
             )
 
-            table = Table(title=f'Available Resources (Allocation: {current_allocation_id})')
+            table = Table(title=(
+                f'Available Resources (Workspace: {workspace_label}, '
+                f'Allocation: {current_allocation_id})'
+            ))
             table.add_column('region', style='yellow')
             table.add_column('GPU Type', style='yellow')
             table.add_column('GPUs', justify='center')
@@ -1107,12 +1124,126 @@ class CloudRuAPIClient:
                 message = 'No rows to display.'
                 if only_available:
                     message = 'No currently available resources (all rows have available=0).'
-                console.print(Panel(message, title=f'Available Resources (Allocation: {current_allocation_id})'))
+                console.print(Panel(
+                    message,
+                    title=(
+                        f'Available Resources (Workspace: {workspace_label}, '
+                        f'Allocation: {current_allocation_id})'
+                    ),
+                ))
 
             all_results[current_allocation_id] = normalized
 
         if return_data:
             return all_results
+        return None
+
+    def used_resources(self, regions=['SR006'], n_last=1000, table_width=160, return_data=False):
+        """Show currently used GPU resources by region.
+
+        Aggregates Running and Pending jobs and GPU counts per region.
+
+        Args:
+            regions (list[str], optional): Regions to inspect. Defaults to ['SR006'].
+            n_last (int, optional): Max jobs to read per region. Defaults to 1000.
+            table_width (int, optional): Console table width. Defaults to 160.
+            return_data (bool, optional): Return aggregated rows/totals. Defaults to False.
+
+        Returns:
+            dict | None: Aggregated data when return_data=True.
+        """
+        rows = []
+
+        total_running_jobs = 0
+        total_pending_jobs = 0
+        total_running_gpus = 0
+        total_pending_gpus = 0
+
+        for region in regions:
+            jobs_data = self._get_jobs(region=region, offset=0, limit=n_last, status_in=['Running', 'Pending'])
+
+            running_jobs = 0
+            pending_jobs = 0
+            running_gpus = 0
+            pending_gpus = 0
+
+            for job in jobs_data:
+                status = str(job.get('status', ''))
+                gpu_count_raw = job.get('gpu_count', 0)
+                try:
+                    gpu_count = int(gpu_count_raw)
+                except (TypeError, ValueError):
+                    gpu_count = 0
+
+                if status == 'Running':
+                    running_jobs += 1
+                    running_gpus += gpu_count
+                elif status == 'Pending':
+                    pending_jobs += 1
+                    pending_gpus += gpu_count
+
+            total_running_jobs += running_jobs
+            total_pending_jobs += pending_jobs
+            total_running_gpus += running_gpus
+            total_pending_gpus += pending_gpus
+
+            rows.append({
+                'region': region,
+                'running_jobs': running_jobs,
+                'pending_jobs': pending_jobs,
+                'gpus_running': running_gpus,
+                'gpus_pending': pending_gpus,
+                'gpus_total': running_gpus + pending_gpus,
+            })
+
+        workspace_label = self._workspace_title_label()
+
+        table = Table(title=f'Used Resources (Workspace: {workspace_label})')
+        table.add_column('region', style='yellow')
+        table.add_column('running_jobs', justify='right')
+        table.add_column('pending_jobs', justify='right')
+        table.add_column('gpus_running', justify='right', style='green')
+        table.add_column('gpus_pending', justify='right', style='yellow')
+        table.add_column('gpus_total', justify='right', style='cyan')
+
+        for row in rows:
+            table.add_row(
+                row['region'],
+                str(row['running_jobs']),
+                str(row['pending_jobs']),
+                str(row['gpus_running']),
+                str(row['gpus_pending']),
+                str(row['gpus_total']),
+            )
+
+        totals_text = Text()
+        totals_text.append('Running jobs: ', style='bold')
+        totals_text.append(str(total_running_jobs))
+        totals_text.append(' | Pending jobs: ', style='bold')
+        totals_text.append(str(total_pending_jobs))
+        totals_text.append('\n')
+        totals_text.append('GPUs running: ', style='bold green')
+        totals_text.append(str(total_running_gpus), style='green')
+        totals_text.append(' | GPUs pending: ', style='bold yellow')
+        totals_text.append(str(total_pending_gpus), style='yellow')
+        totals_text.append(' | GPUs total: ', style='bold cyan')
+        totals_text.append(str(total_running_gpus + total_pending_gpus), style='cyan')
+
+        console = Console(width=table_width)
+        console.print(table)
+        console.print(Panel(totals_text, title=f'Used Resources Summary (Workspace: {workspace_label})'))
+
+        if return_data:
+            return {
+                'rows': rows,
+                'totals': {
+                    'running_jobs': total_running_jobs,
+                    'pending_jobs': total_pending_jobs,
+                    'gpus_running': total_running_gpus,
+                    'gpus_pending': total_pending_gpus,
+                    'gpus_total': total_running_gpus + total_pending_gpus,
+                }
+            }
         return None
 
     def job_status(self, job_id):
@@ -1172,7 +1303,8 @@ class CloudRuAPIClient:
         jobs_data = sorted(jobs_data, key=lambda x: x['created_dt'], reverse=True)
 
         # Create rich table
-        table = Table(title="Jobs")
+        workspace_label = self._workspace_title_label()
+        table = Table(title=f"Jobs (Workspace: {workspace_label})")
 
         # Add columns
         table.add_column("Created", justify="left", style="cyan")

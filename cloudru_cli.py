@@ -359,6 +359,24 @@ def cmd_available_resources(
         _fail(exc, debug_mode)
 
 
+@resources_app.command("used")
+def cmd_used_resources(
+    ctx: typer.Context,
+    region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
+    n: int = typer.Option(1000, "--n", min=1),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
+        regions = region if region else [cfg.get("region") or "SR006"]
+        client.used_resources(regions=regions, n_last=n, table_width=table_width)
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
 @jobs_app.command("list")
 def cmd_jobs_list(
     ctx: typer.Context,
