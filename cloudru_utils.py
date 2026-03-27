@@ -1138,7 +1138,7 @@ class CloudRuAPIClient:
             return all_results
         return None
 
-    def used_resources(self, regions=['SR006'], n_last=1000, table_width=160, return_data=False):
+    def used_resources(self, regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True):
         """Show currently used GPU resources by region.
 
         Aggregates Running and Pending jobs and GPU counts per region.
@@ -1148,6 +1148,7 @@ class CloudRuAPIClient:
             n_last (int, optional): Max jobs to read per region. Defaults to 1000.
             table_width (int, optional): Console table width. Defaults to 160.
             return_data (bool, optional): Return aggregated rows/totals. Defaults to False.
+            show_table (bool, optional): Print table/panel output. Defaults to True.
 
         Returns:
             dict | None: Aggregated data when return_data=True.
@@ -1198,24 +1199,6 @@ class CloudRuAPIClient:
 
         workspace_label = self._workspace_title_label()
 
-        table = Table(title=f'Used Resources (Workspace: {workspace_label})')
-        table.add_column('region', style='yellow')
-        table.add_column('running_jobs', justify='right')
-        table.add_column('pending_jobs', justify='right')
-        table.add_column('gpus_running', justify='right', style='green')
-        table.add_column('gpus_pending', justify='right', style='yellow')
-        table.add_column('gpus_total', justify='right', style='cyan')
-
-        for row in rows:
-            table.add_row(
-                row['region'],
-                str(row['running_jobs']),
-                str(row['pending_jobs']),
-                str(row['gpus_running']),
-                str(row['gpus_pending']),
-                str(row['gpus_total']),
-            )
-
         totals_text = Text()
         totals_text.append('Running jobs: ', style='bold')
         totals_text.append(str(total_running_jobs))
@@ -1229,9 +1212,28 @@ class CloudRuAPIClient:
         totals_text.append(' | GPUs total: ', style='bold cyan')
         totals_text.append(str(total_running_gpus + total_pending_gpus), style='cyan')
 
-        console = Console(width=table_width)
-        console.print(table)
-        console.print(Panel(totals_text, title=f'Used Resources Summary (Workspace: {workspace_label})'))
+        if show_table:
+            table = Table(title=f'Used Resources (Workspace: {workspace_label})')
+            table.add_column('region', style='yellow')
+            table.add_column('running_jobs', justify='right')
+            table.add_column('pending_jobs', justify='right')
+            table.add_column('gpus_running', justify='right', style='green')
+            table.add_column('gpus_pending', justify='right', style='yellow')
+            table.add_column('gpus_total', justify='right', style='cyan')
+
+            for row in rows:
+                table.add_row(
+                    row['region'],
+                    str(row['running_jobs']),
+                    str(row['pending_jobs']),
+                    str(row['gpus_running']),
+                    str(row['gpus_pending']),
+                    str(row['gpus_total']),
+                )
+
+            console = Console(width=table_width)
+            console.print(table)
+            console.print(Panel(totals_text, title=f'Used Resources Summary (Workspace: {workspace_label})'))
 
         if return_data:
             return {
@@ -1242,7 +1244,8 @@ class CloudRuAPIClient:
                     'gpus_running': total_running_gpus,
                     'gpus_pending': total_pending_gpus,
                     'gpus_total': total_running_gpus + total_pending_gpus,
-                }
+                },
+                'workspace': workspace_label,
             }
         return None
 

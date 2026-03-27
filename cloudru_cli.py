@@ -12,12 +12,14 @@ import typer
 import yaml
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from cloudru_config import (
     CONFIG_PATH,
     CREDENTIALS_PATH,
     file_mode,
+    list_profiles,
     load_cached_token,
     load_profile,
     redact,
@@ -363,6 +365,7 @@ def cmd_available_resources(
 def cmd_used_resources(
     ctx: typer.Context,
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
+    all_profiles: bool = typer.Option(False, "--all", help="Collect from all configured profiles"),
     n: int = typer.Option(1000, "--n", min=1),
     table_width: int = typer.Option(160, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -370,9 +373,98 @@ def cmd_used_resources(
 ) -> None:
     debug_mode = _resolve_debug(ctx, debug)
     try:
-        client, cfg = _build_client(_resolve_profile(ctx, profile))
-        regions = region if region else [cfg.get("region") or "SR006"]
-        client.used_resources(regions=regions, n_last=n, table_width=table_width)
+        if not all_profiles:
+            client, cfg = _build_client(_resolve_profile(ctx, profile))
+            regions = region if region else [cfg.get("region") or "SR006"]
+            client.used_resources(regions=regions, n_last=n, table_width=table_width)
+            return
+
+        profiles = list_profiles()
+        if not profiles:
+            raise RuntimeError("No profiles found. Run `cloudru init --profile <name>` first.")
+
+        combined_rows = []
+        failed_profiles = []
+
+        total_running_jobs = 0
+        total_pending_jobs = 0
+        total_running_gpus = 0
+        total_pending_gpus = 0
+
+        for profile_name in profiles:
+            try:
+                client, cfg = _build_client(profile_name)
+                regions = region if region else [cfg.get("region") or "SR006"]
+                data = client.used_resources(regions=regions, n_last=n, table_width=table_width,
+                                             return_data=True, show_table=False)
+                if not data:
+                    failed_profiles.append((profile_name, "empty response"))
+                    continue
+
+                workspace = data.get("workspace", "Unknown workspace")
+                for row in data.get("rows", []):
+                    combined_rows.append({
+                        "profile": profile_name,
+                        "workspace": workspace,
+                        **row,
+                    })
+
+                totals = data.get("totals", {})
+                total_running_jobs += int(totals.get("running_jobs", 0))
+                total_pending_jobs += int(totals.get("pending_jobs", 0))
+                total_running_gpus += int(totals.get("gpus_running", 0))
+                total_pending_gpus += int(totals.get("gpus_pending", 0))
+            except Exception as exc:
+                failed_profiles.append((profile_name, str(exc)))
+
+        if not combined_rows and failed_profiles:
+            details = "\n".join([f"- {name}: {err}" for name, err in failed_profiles])
+            raise RuntimeError(f"Failed to collect data for all profiles:\n{details}")
+
+        table = Table(title="Used Resources (All Profiles)")
+        table.add_column("profile", style="cyan")
+        table.add_column("workspace", style="magenta")
+        table.add_column("region", style="yellow")
+        table.add_column("running_jobs", justify="right")
+        table.add_column("pending_jobs", justify="right")
+        table.add_column("gpus_running", justify="right", style="green")
+        table.add_column("gpus_pending", justify="right", style="yellow")
+        table.add_column("gpus_total", justify="right", style="cyan")
+
+        for row in combined_rows:
+            table.add_row(
+                row["profile"],
+                row["workspace"],
+                row["region"],
+                str(row["running_jobs"]),
+                str(row["pending_jobs"]),
+                str(row["gpus_running"]),
+                str(row["gpus_pending"]),
+                str(row["gpus_total"]),
+            )
+
+        totals_text = Text()
+        totals_text.append("Running jobs: ", style="bold")
+        totals_text.append(str(total_running_jobs))
+        totals_text.append(" | Pending jobs: ", style="bold")
+        totals_text.append(str(total_pending_jobs))
+        totals_text.append("\n")
+        totals_text.append("GPUs running: ", style="bold green")
+        totals_text.append(str(total_running_gpus), style="green")
+        totals_text.append(" | GPUs pending: ", style="bold yellow")
+        totals_text.append(str(total_pending_gpus), style="yellow")
+        totals_text.append(" | GPUs total: ", style="bold cyan")
+        totals_text.append(str(total_running_gpus + total_pending_gpus), style="cyan")
+
+        console = Console(width=table_width)
+        console.print(table)
+        console.print(Panel(totals_text, title="Used Resources Summary (All Profiles)"))
+
+        if failed_profiles:
+            failed_text = Text()
+            for profile_name, error in failed_profiles:
+                failed_text.append(f"- {profile_name}: {error}\n")
+            console.print(Panel(failed_text, title="Profiles with errors"))
     except Exception as exc:
         _fail(exc, debug_mode)
 

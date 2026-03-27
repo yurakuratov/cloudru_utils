@@ -154,6 +154,15 @@ def save_cached_token(profile: str, access_token: str, access_token_expires_at: 
         pass
 
 
+def list_profiles() -> list[str]:
+    """Return all profile names found in config/credentials files."""
+    ensure_storage()
+    config = _read_ini(CONFIG_PATH)
+    credentials = _read_ini(CREDENTIALS_PATH)
+    profiles = set(config.sections()) | set(credentials.sections())
+    return sorted(profiles)
+
+
 def redact(value: str | None, keep: int = 4) -> str:
     if value is None:
         return ""

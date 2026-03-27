@@ -63,6 +63,8 @@ cloudru resources available
 cloudru resources available --all
 cloudru resources used
 cloudru resources used --region SR006 --n 2000
+cloudru resources used --all
+cloudru resources used --all --region SR006
 cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
 cloudru jobs submit -f job.yaml --dry-run
@@ -221,11 +223,12 @@ cloud_client.kill_job(job_id, region="SR006")
 - `workspace_info(refresh=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
 - `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
-- `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False)`
+- `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True)`
 
 ## Notes
 
 - CLI supports monitoring/control workflows and YAML-based job submission.
+- `cloudru resources used --all` works in best-effort mode and reports profiles with errors without failing the whole command if at least one profile succeeds.
 - `submit_job` exposes many API parameters; validate your runtime/env/image settings for your workspace.
 - If `client_lib` is not installed, `show_current_jobs` is unavailable, but `CloudRuAPIClient` still works with explicit workspace headers.
 
