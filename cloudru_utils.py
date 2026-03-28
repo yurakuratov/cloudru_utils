@@ -106,6 +106,8 @@ class CloudRuAPIClient:
     JOB_STATUSES = ['Completed', 'Completing', 'Deleted', 'Failed', 'Pending',
                     'Running', 'Stopped', 'Succeeded', 'Terminated']
 
+    TERMINAL_JOB_STATUSES = ['Completed', 'Succeeded', 'Failed', 'Terminated', 'Stopped', 'Deleted']
+
     STATUS_STYLES = {
         'Running': 'green',
         'Failed': 'red',
@@ -1297,6 +1299,75 @@ class CloudRuAPIClient:
         panel = Panel(status_text, title="Job Status")
         return console.print(panel)
 
+    @staticmethod
+    def _format_job_datetime(dt_raw):
+        if not dt_raw:
+            return 'Unknown'
+        try:
+            dt = datetime.strptime(dt_raw, '%Y-%m-%dT%H:%M:%SZ') + timedelta(hours=3)
+            return dt.strftime('%Y-%m-%dT%H:%M:%S')
+        except (TypeError, ValueError):
+            return str(dt_raw)
+
+    @staticmethod
+    def _format_job_cost(cost_raw):
+        try:
+            return f"{float(cost_raw):.01f}"
+        except (TypeError, ValueError):
+            return '0.0'
+
+    @staticmethod
+    def _format_job_duration(duration_raw):
+        duration_raw = str(duration_raw or '')
+        try:
+            return str(timedelta(seconds=int(duration_raw[:-1]))).zfill(8)
+        except (TypeError, ValueError):
+            return duration_raw or 'Unknown'
+
+    def _render_jobs_table(self, jobs_data, table_title, time_column, time_getter, table_width=160):
+        table = Table(title=table_title)
+        table.add_column(time_column, justify='left', style='cyan')
+        table.add_column('Job ID', no_wrap=True, justify='left', style='magenta')
+        table.add_column('Status', justify='center', style='green')
+        table.add_column('Region', justify='center', style='yellow')
+        table.add_column('GPUs', justify='center')
+        table.add_column('Description', overflow='fold')
+        table.add_column('Cost', justify='right')
+        table.add_column('Duration', justify='right')
+
+        rendered_rows = []
+        for job in jobs_data:
+            status = job.get('status', '')
+            status_style = self.STATUS_STYLES.get(status, 'white')
+            time_value = time_getter(job)
+
+            row = {
+                'time': time_value,
+                'job_id': job.get('job_name', ''),
+                'status': status,
+                'region': job.get('region', ''),
+                'gpus': str(job.get('gpu_count', '0')),
+                'description': job.get('job_desc', ''),
+                'cost': self._format_job_cost(job.get('cost', 0.0)),
+                'duration': self._format_job_duration(job.get('duration', '')),
+            }
+            rendered_rows.append(row)
+
+            table.add_row(
+                row['time'],
+                row['job_id'],
+                f"[{status_style}]{row['status']}[/{status_style}]",
+                row['region'],
+                row['gpus'],
+                row['description'],
+                row['cost'],
+                row['duration'],
+            )
+
+        console = Console(width=table_width)
+        console.print(table)
+        return rendered_rows
+
     def jobs(self, status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160):
         """Display a formatted table of jobs sorted by creation date"""
         jobs_data = []
@@ -1305,45 +1376,55 @@ class CloudRuAPIClient:
                                         status_not_in=status_not_in)
         jobs_data = sorted(jobs_data, key=lambda x: x['created_dt'], reverse=True)
 
-        # Create rich table
         workspace_label = self._workspace_title_label()
-        table = Table(title=f"Jobs (Workspace: {workspace_label})")
+        self._render_jobs_table(
+            jobs_data=jobs_data,
+            table_title=f'Jobs (Workspace: {workspace_label})',
+            time_column='Created',
+            time_getter=lambda job: self._format_job_datetime(job.get('created_dt')),
+            table_width=table_width,
+        )
 
-        # Add columns
-        table.add_column("Created", justify="left", style="cyan")
-        table.add_column("Job ID", no_wrap=True, justify="left", style="magenta")
-        table.add_column("Status", justify="center", style="green")
-        table.add_column("Region", justify="center", style="yellow")
-        table.add_column("GPUs", justify="center")
-        table.add_column("Description", overflow="fold")
-        table.add_column("Cost", justify="right")
-        table.add_column("Duration", justify="right")
+    def finished_jobs(self, regions=['SR006'], n_last=1000, status_in=None, table_width=160, return_data=False):
+        """Display recently finished jobs with completion time.
 
-        # job keys:
-        # ['uid', 'job_name', 'status', 'region', 'instance_type', 'job_desc', 'created_dt', 'updated_dt',
-        # 'completed_dt', 'cost', 'gpu_count', 'duration', 'namespace']
+        Args:
+            regions (list[str], optional): Regions to query.
+            n_last (int, optional): Max jobs to fetch per region.
+            status_in (list[str] | None, optional): Terminal statuses to include.
+            table_width (int, optional): Console table width.
+            return_data (bool, optional): Return rows instead of only printing.
+        """
+        statuses = self.TERMINAL_JOB_STATUSES if not status_in else status_in
 
-        # Add rows
-        for job in jobs_data:
-            status_style = self.STATUS_STYLES.get(job['status'], 'white')
+        jobs_data = []
+        for region in regions:
+            jobs_data += self._get_jobs(region=region, offset=0, limit=n_last, status_in=statuses, status_not_in=[])
 
-            # Convert UTC to +3 timezone
-            # todo: convert all dates in jobs_data to +3 timezone
-            created_dt = datetime.strptime(job['created_dt'], '%Y-%m-%dT%H:%M:%SZ')
-            created_dt = created_dt + timedelta(hours=3)
-            created_dt_str = created_dt.strftime('%Y-%m-%dT%H:%M:%S')
+        def _parse_job_dt(job):
+            for key in ['completed_dt', 'updated_dt', 'created_dt']:
+                value = job.get(key)
+                if not value:
+                    continue
+                try:
+                    return datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ')
+                except (TypeError, ValueError):
+                    continue
+            return datetime.fromtimestamp(0)
 
-            table.add_row(
-                created_dt_str,
-                job['job_name'],
-                f"[{status_style}]{job['status']}[/{status_style}]",
-                job['region'],
-                str(job['gpu_count']),
-                job['job_desc'],
-                f"{float(job['cost']):.01f}",
-                str(timedelta(seconds=int(job['duration'][:-1]))).zfill(8)
-            )
+        jobs_data = sorted(jobs_data, key=_parse_job_dt, reverse=True)
 
-        # Display table
-        console = Console(width=table_width)
-        console.print(table)
+        workspace_label = self._workspace_title_label()
+        rendered_rows = self._render_jobs_table(
+            jobs_data=jobs_data,
+            table_title=f'Finished Jobs (Workspace: {workspace_label})',
+            time_column='Finished',
+            time_getter=lambda job: self._format_job_datetime(
+                job.get('completed_dt') or job.get('updated_dt') or job.get('created_dt')
+            ),
+            table_width=table_width,
+        )
+
+        if return_data:
+            return rendered_rows
+        return None

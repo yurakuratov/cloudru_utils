@@ -247,7 +247,7 @@ def root_callback(
     ctx.obj = {"profile": profile, "debug": debug}
 
 
-@app.command("init")
+@app.command("init", help="Initialize or update profile credentials/config")
 def cmd_init(
     ctx: typer.Context,
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -295,11 +295,13 @@ def cmd_init(
         typer.echo(f"x_workspace_id: {init_x_workspace_id}")
         typer.echo(f"region: {init_region}")
         typer.echo(f"source: {init_source}")
+    except typer.Exit:
+        raise
     except Exception as exc:
         _fail(exc, debug_mode)
 
 
-@workspace_app.command("info")
+@workspace_app.command("info", help="Show current workspace information")
 def cmd_workspace_info(
     ctx: typer.Context,
     refresh: bool = typer.Option(False, "--refresh"),
@@ -314,7 +316,7 @@ def cmd_workspace_info(
         _fail(exc, debug_mode)
 
 
-@resources_app.command("instance-types")
+@resources_app.command("instance-types", help="Show supported instance types for region")
 def cmd_instance_types(
     ctx: typer.Context,
     region: Optional[str] = typer.Option(None, "--region"),
@@ -332,7 +334,7 @@ def cmd_instance_types(
         _fail(exc, debug_mode)
 
 
-@resources_app.command("available")
+@resources_app.command("available", help="Show currently available resources")
 def cmd_available_resources(
     ctx: typer.Context,
     allocation_id: Optional[str] = typer.Option(None, "--allocation-id"),
@@ -361,7 +363,7 @@ def cmd_available_resources(
         _fail(exc, debug_mode)
 
 
-@resources_app.command("used")
+@resources_app.command("used", help="Show currently used GPUs (running/pending)")
 def cmd_used_resources(
     ctx: typer.Context,
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
@@ -469,7 +471,7 @@ def cmd_used_resources(
         _fail(exc, debug_mode)
 
 
-@jobs_app.command("list")
+@jobs_app.command("list", help="List jobs by status and region")
 def cmd_jobs_list(
     ctx: typer.Context,
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
@@ -498,7 +500,27 @@ def cmd_jobs_list(
         _fail(exc, debug_mode)
 
 
-@jobs_app.command("status")
+@jobs_app.command("finished", help="Show most recently finished jobs")
+def cmd_jobs_finished(
+    ctx: typer.Context,
+    region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
+    status: Optional[list[str]] = typer.Option(None, "--status", help="Repeatable or comma-separated"),
+    n: int = typer.Option(20, "--n", min=1),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        statuses = _normalize_status_list(status or [], "--status") if status else CloudRuAPIClient.TERMINAL_JOB_STATUSES
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
+        regions = region if region else [cfg.get("region") or "SR006"]
+        client.finished_jobs(regions=regions, n_last=n, status_in=statuses, table_width=table_width)
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@jobs_app.command("status", help="Show detailed status for a job")
 def cmd_jobs_status(
     ctx: typer.Context,
     job_id: str,
@@ -513,7 +535,7 @@ def cmd_jobs_status(
         _fail(exc, debug_mode)
 
 
-@jobs_app.command("logs")
+@jobs_app.command("logs", help="Stream logs for a job")
 def cmd_jobs_logs(
     ctx: typer.Context,
     job_id: str,
@@ -532,25 +554,118 @@ def cmd_jobs_logs(
         _fail(exc, debug_mode)
 
 
-@jobs_app.command("kill")
+@jobs_app.command("kill", help="Delete one or more jobs")
 def cmd_jobs_kill(
     ctx: typer.Context,
-    job_id: str,
+    job_ids: list[str] = typer.Argument(..., help="One or more job IDs"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     region: Optional[str] = typer.Option(None, "--region"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
     debug_mode = _resolve_debug(ctx, debug)
     try:
-        client, cfg = _build_client(_resolve_profile(ctx, profile))
+        profile_name = _resolve_profile(ctx, profile)
+        client, cfg = _build_client(profile_name)
         target_region = region or cfg.get("region") or "SR006"
-        result = client.kill_job(job_id, region=target_region)
-        typer.echo(result)
+        workspace_name = "Unknown workspace"
+        try:
+            workspace_info = client.get_workspace_info(refresh=False)
+            if isinstance(workspace_info, dict):
+                workspace_name = workspace_info.get("name") or workspace_name
+        except Exception:
+            pass
+
+        if not yes:
+            preview_ids = ", ".join(job_ids)
+            confirmed = typer.confirm(
+                (
+                    f"Delete {len(job_ids)} job(s) in workspace {workspace_name} "
+                    f"(profile {profile_name}, region {target_region})?\n{preview_ids}"
+                ),
+                default=False,
+            )
+            if not confirmed:
+                typer.echo("Cancelled by user.")
+                return
+
+        console = Console()
+        deleted_count = 0
+        failed = []
+
+        for job_id in job_ids:
+            try:
+                result = client.kill_job(job_id, region=target_region)
+
+                if isinstance(result, dict) and result.get("job_name"):
+                    status_raw = str(result.get("status", "Unknown"))
+                    status = status_raw.capitalize()
+                    status_style = CloudRuAPIClient.STATUS_STYLES.get(
+                        status,
+                        "cyan" if status.lower() == "deleted" else "white",
+                    )
+
+                    deleted_at_raw = result.get("deleted_at")
+                    deleted_at_str = "Unknown"
+                    try:
+                        if deleted_at_raw is not None:
+                            deleted_at_str = datetime.fromtimestamp(float(deleted_at_raw)).strftime("%Y-%m-%d %H:%M:%S")
+                    except (TypeError, ValueError, OSError):
+                        deleted_at_str = str(deleted_at_raw)
+
+                    error_code = result.get("error_code", "Unknown")
+                    error_message = str(result.get("error_message", ""))
+
+                    status_text = Text()
+                    status_text.append("Job ID: ", style="bold")
+                    status_text.append(f"{result.get('job_name')}\n")
+
+                    status_text.append("Status: ", style="bold")
+                    status_text.append(f"{status}\n", style=status_style)
+
+                    status_text.append("Deleted: ", style="bold")
+                    status_text.append(f"{deleted_at_str}\n")
+
+                    status_text.append("Error code: ", style="bold red")
+                    status_text.append(f"{error_code}\n")
+
+                    status_text.append("Error message: ", style="bold red")
+                    status_text.append(error_message)
+
+                    console.print(Panel(status_text, title="Job Delete Status"))
+
+                    if str(error_code) in {"0", "0.0"} and status.lower() == "deleted":
+                        deleted_count += 1
+                    else:
+                        failed.append((job_id, f"error_code={error_code}, status={status}, error_message={error_message}"))
+                else:
+                    console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Job Delete Response"))
+                    failed.append((job_id, "unexpected response format"))
+            except Exception as exc:
+                if debug_mode:
+                    traceback.print_exc()
+                failed.append((job_id, str(exc)))
+
+        summary = Text()
+        summary.append("Requested: ", style="bold")
+        summary.append(str(len(job_ids)))
+        summary.append(" | Deleted: ", style="bold green")
+        summary.append(str(deleted_count), style="green")
+        summary.append(" | Failed: ", style="bold red")
+        summary.append(str(len(failed)), style="red")
+        console.print(Panel(summary, title="Job Delete Summary"))
+
+        if failed:
+            failed_text = Text()
+            for job_id, err in failed:
+                failed_text.append(f"- {job_id}: {err}\n")
+            console.print(Panel(failed_text, title="Failed Deletes"))
+            raise typer.Exit(1)
     except Exception as exc:
         _fail(exc, debug_mode)
 
 
-@jobs_app.command("submit")
+@jobs_app.command("submit", help="Submit job from YAML with CLI overrides")
 def cmd_jobs_submit(
     ctx: typer.Context,
     file: str = typer.Option(..., "-f", "--file", help="Path to YAML config with job settings"),

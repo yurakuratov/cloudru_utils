@@ -50,6 +50,9 @@ cloudru resources available
 
 # See currently used GPUs (running, pending, total)
 cloudru resources used
+
+# See most recently finished jobs
+cloudru jobs finished --n 20
 ```
 
 ## CLI Usage
@@ -67,6 +70,8 @@ cloudru resources used --all
 cloudru resources used --all --region SR006
 cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
+cloudru jobs finished --n 20
+cloudru jobs finished --status Completed,Succeeded --n 20
 cloudru jobs submit -f job.yaml --dry-run
 cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
 cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
@@ -74,6 +79,7 @@ cloudru jobs submit -f job.yaml --json
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+cloudru jobs kill lm-mpi-job-xxxx lm-mpi-job-yyyy --yes
 ```
 
 Example `job.yaml` for CLI submit (setup + run are submitted as one job command):
@@ -216,6 +222,7 @@ cloud_client.kill_job(job_id, region="SR006")
 - `CloudRuAPIClient(client_id, client_secret, x_api_key=None, x_workspace_id=None, ...)`
 - `submit_job(...)`
 - `jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160)`
+- `finished_jobs(regions=['SR006'], n_last=1000, status_in=None, table_width=160, return_data=False)`
 - `job_status(job_id)`
 - `job_logs(job_id, tail=100, verbose=False, region='SR006')`
 - `kill_job(job_id, region='SR006')`
