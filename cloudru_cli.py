@@ -6,7 +6,6 @@ import os
 import shlex
 import traceback
 from typing import Optional
-from datetime import datetime
 
 import typer
 import yaml
@@ -599,70 +598,18 @@ def cmd_jobs_kill(
         for job_id in job_ids:
             try:
                 result = client.kill_job(job_id, region=target_region)
-
-                if isinstance(result, dict) and result.get("job_name"):
-                    status_raw = str(result.get("status", "Unknown"))
-                    status = status_raw.capitalize()
-                    status_style = CloudRuAPIClient.STATUS_STYLES.get(
-                        status,
-                        "cyan" if status.lower() == "deleted" else "white",
-                    )
-
-                    deleted_at_raw = result.get("deleted_at")
-                    deleted_at_str = "Unknown"
-                    try:
-                        if deleted_at_raw is not None:
-                            deleted_at_str = datetime.fromtimestamp(float(deleted_at_raw)).strftime("%Y-%m-%d %H:%M:%S")
-                    except (TypeError, ValueError, OSError):
-                        deleted_at_str = str(deleted_at_raw)
-
-                    error_code = result.get("error_code", "Unknown")
-                    error_message = str(result.get("error_message", ""))
-
-                    status_text = Text()
-                    status_text.append("Job ID: ", style="bold")
-                    status_text.append(f"{result.get('job_name')}\n")
-
-                    status_text.append("Status: ", style="bold")
-                    status_text.append(f"{status}\n", style=status_style)
-
-                    status_text.append("Deleted: ", style="bold")
-                    status_text.append(f"{deleted_at_str}\n")
-
-                    status_text.append("Error code: ", style="bold red")
-                    status_text.append(f"{error_code}\n")
-
-                    status_text.append("Error message: ", style="bold red")
-                    status_text.append(error_message)
-
-                    console.print(Panel(status_text, title="Job Delete Status"))
-
-                    if str(error_code) in {"0", "0.0"} and status.lower() == "deleted":
-                        deleted_count += 1
-                    else:
-                        failed.append((job_id, f"error_code={error_code}, status={status}, error_message={error_message}"))
+                parsed = client.render_job_delete_response(result, console=console)
+                if parsed.get("ok"):
+                    deleted_count += 1
                 else:
-                    console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Job Delete Response"))
-                    failed.append((job_id, "unexpected response format"))
+                    failed.append((job_id, parsed.get("error_summary", "delete failed")))
             except Exception as exc:
                 if debug_mode:
                     traceback.print_exc()
                 failed.append((job_id, str(exc)))
 
-        summary = Text()
-        summary.append("Requested: ", style="bold")
-        summary.append(str(len(job_ids)))
-        summary.append(" | Deleted: ", style="bold green")
-        summary.append(str(deleted_count), style="green")
-        summary.append(" | Failed: ", style="bold red")
-        summary.append(str(len(failed)), style="red")
-        console.print(Panel(summary, title="Job Delete Summary"))
-
+        client.render_job_delete_summary(requested=len(job_ids), deleted=deleted_count, failed=failed, console=console)
         if failed:
-            failed_text = Text()
-            for job_id, err in failed:
-                failed_text.append(f"- {job_id}: {err}\n")
-            console.print(Panel(failed_text, title="Failed Deletes"))
             raise typer.Exit(1)
     except Exception as exc:
         _fail(exc, debug_mode)
@@ -764,31 +711,11 @@ def cmd_jobs_submit(
             return
 
         console = Console()
-        if isinstance(result, dict) and result.get("job_name"):
-            status = str(result.get("status", "Unknown"))
-            status_style = CloudRuAPIClient.STATUS_STYLES.get(status.capitalize(), "white")
-
-            created_at = result.get("created_at")
-            created_str = "Unknown"
-            try:
-                if created_at is not None:
-                    created_str = datetime.fromtimestamp(float(created_at)).strftime("%Y-%m-%d %H:%M:%S")
-            except (TypeError, ValueError, OSError):
-                created_str = str(created_at)
-
-            info = Text()
-            info.append("Job ID: ", style="bold")
-            info.append(f"{result.get('job_name')}\n")
-            info.append("Status: ", style="bold")
-            info.append(f"{status}\n", style=status_style)
-            info.append("Created: ", style="bold")
-            info.append(created_str)
-
-            console.print(Panel(info, title="Job Submitted"))
-            console.print(f"Next: cloudru jobs status {result.get('job_name')}")
-            console.print(f"Next: cloudru jobs logs {result.get('job_name')}")
-        else:
-            console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Submit Response"))
+        parsed = client.render_submit_response(result, console=console)
+        job_name = parsed.get("job_id")
+        if job_name:
+            console.print(f"Next: cloudru jobs status {job_name}")
+            console.print(f"Next: cloudru jobs logs {job_name}")
     except Exception as exc:
         _fail(exc, debug_mode)
 

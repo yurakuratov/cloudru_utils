@@ -6,6 +6,7 @@ except ImportError:
 
 import contextlib
 import io
+import json
 import re
 
 from rich.table import Table
@@ -685,7 +686,7 @@ class CloudRuAPIClient:
         response = self._request_with_auth('delete', url, headers=headers, params=params)
         return response.json()
 
-    def job_logs(self, job_id, tail=100, verbose=False, region='SR006'):
+    def job_logs(self, job_id, tail=100, verbose=False, region='SR006', return_data=False, show_output=True):
         """Print logs for a specific job.
 
         Args:
@@ -693,12 +694,21 @@ class CloudRuAPIClient:
             tail (int, optional): Number of log lines to return from the end. Defaults to 100. 0 will get all logs.
             verbose (bool, optional): Whether to include verbose logs. Defaults to False.
             region (str, optional): Region where the job is running. Defaults to 'SR006'.
+            return_data (bool, optional): Return collected log lines. Defaults to False.
+            show_output (bool, optional): Print logs while reading. Defaults to True.
         """
+        lines = []
         try:
             for log in self._get_job_logs(job_id, tail=tail, verbose=verbose, region=region):
-                print(log)
+                lines.append(log)
+                if show_output:
+                    print(log)
         except KeyboardInterrupt:
             ...
+
+        if return_data:
+            return lines
+        return None
 
     def get_workspace_info(self, refresh=True):
         """Get current workspace info and cache connected allocations.
@@ -1259,53 +1269,168 @@ class CloudRuAPIClient:
             }
         return None
 
-    def job_status(self, job_id):
+    def job_status(self, job_id, return_data=False, show_output=True):
         """Get human readable status information for a job
 
         Args:
             job_id (str): ID of the job to get status for
+            return_data (bool, optional): Return normalized status dictionary. Defaults to False.
+            show_output (bool, optional): Print rich panel output. Defaults to True.
 
         Returns:
             str: Formatted string with job status information
         """
         status = self._get_job_status(job_id)
 
-        # Convert timestamps to datetime objects
-        created = datetime.fromtimestamp(status.get('created_at', 0))
-        pending = datetime.fromtimestamp(status.get('pending_at', 0))
-        running = datetime.fromtimestamp(status.get('running_at', 0))
-        completed = datetime.fromtimestamp(status.get('completed_at', 0))
+        created = self._format_unix_timestamp(status.get('created_at'))
+        pending = self._format_unix_timestamp(status.get('pending_at'))
+        running = self._format_unix_timestamp(status.get('running_at'))
+        completed = self._format_unix_timestamp(status.get('completed_at'))
 
-        console = Console()
+        normalized = {
+            'job_id': status.get('job_name', ''),
+            'status': str(status.get('status', 'Unknown')).capitalize(),
+            'error_code': status.get('error_code'),
+            'error_message': status.get('error_message', ''),
+            'created_at_raw': status.get('created_at'),
+            'pending_at_raw': status.get('pending_at'),
+            'running_at_raw': status.get('running_at'),
+            'completed_at_raw': status.get('completed_at'),
+            'created_at_display': created,
+            'pending_at_display': pending,
+            'running_at_display': running,
+            'completed_at_display': completed,
+            'raw': status,
+        }
+
+        if show_output:
+            console = Console()
+            status_text = Text()
+            status_text.append("Job ID: ", style="bold")
+            status_text.append(f"{normalized['job_id'] or 'Unknown'}\n")
+
+            status_text.append("Status: ", style="bold")
+            job_status = normalized['status']
+            status_text.append(f"{job_status}\n", style=self.STATUS_STYLES.get(job_status, 'white'))
+
+            status_text.append("Created: ", style="bold")
+            status_text.append(f"{normalized['created_at_display']}\n")
+
+            status_text.append("Pending: ", style="bold")
+            status_text.append(f"{normalized['pending_at_display']}\n")
+
+            status_text.append("Running: ", style="bold")
+            status_text.append(f"{normalized['running_at_display']}\n")
+
+            status_text.append("Completed: ", style="bold")
+            status_text.append(f"{normalized['completed_at_display']}\n")
+
+            status_text.append("Error code: ", style="bold red")
+            status_text.append(f"{normalized['error_code']}\n")
+
+            status_text.append("Error message: ", style="bold red")
+            status_text.append(str(normalized['error_message']))
+
+            panel = Panel(status_text, title="Job Status")
+            console.print(panel)
+
+        if return_data:
+            return normalized
+        return None
+
+    @staticmethod
+    def _format_unix_timestamp(ts_raw):
+        try:
+            if ts_raw is None:
+                return 'Unknown'
+            return datetime.fromtimestamp(float(ts_raw)).strftime('%Y-%m-%d %H:%M:%S')
+        except (TypeError, ValueError, OSError):
+            return str(ts_raw)
+
+    def render_job_delete_response(self, result, console=None):
+        """Render single-job delete response and return parsed outcome."""
+        console = console or Console()
+
+        if not isinstance(result, dict) or not result.get('job_name'):
+            console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title='Job Delete Response'))
+            return {
+                'recognized': False,
+                'ok': False,
+                'job_id': '',
+                'error_summary': 'unexpected response format',
+            }
+
+        status_raw = str(result.get('status', 'Unknown'))
+        status = status_raw.capitalize()
+        status_style = self.STATUS_STYLES.get(status, 'cyan' if status.lower() == 'deleted' else 'white')
+
+        deleted_at_str = self._format_unix_timestamp(result.get('deleted_at'))
+        error_code = result.get('error_code', 'Unknown')
+        error_message = str(result.get('error_message', ''))
 
         status_text = Text()
-        status_text.append("Job ID: ", style="bold")
-        status_text.append(f"{status.get('job_name', 'Unknown')}\n")
+        status_text.append('Job ID: ', style='bold')
+        status_text.append(f"{result.get('job_name')}\n")
+        status_text.append('Status: ', style='bold')
+        status_text.append(f"{status}\n", style=status_style)
+        status_text.append('Deleted: ', style='bold')
+        status_text.append(f"{deleted_at_str}\n")
+        status_text.append('Error code: ', style='bold red')
+        status_text.append(f"{error_code}\n")
+        status_text.append('Error message: ', style='bold red')
+        status_text.append(error_message)
+        console.print(Panel(status_text, title='Job Delete Status'))
 
-        status_text.append("Status: ", style="bold")
-        job_status = status.get('status', 'Unknown').capitalize()
-        status_text.append(f"{job_status}\n", style=self.STATUS_STYLES.get(job_status, 'white'))
+        ok = str(error_code) in {'0', '0.0'} and status.lower() == 'deleted'
+        return {
+            'recognized': True,
+            'ok': ok,
+            'job_id': str(result.get('job_name') or ''),
+            'error_summary': f"error_code={error_code}, status={status}, error_message={error_message}",
+        }
 
-        status_text.append("Created: ", style="bold")
-        status_text.append(f"{created.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    @staticmethod
+    def render_job_delete_summary(requested, deleted, failed, console=None):
+        """Render bulk delete summary and failed list."""
+        console = console or Console()
 
-        status_text.append("Pending: ", style="bold")
-        status_text.append(f"{pending.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        summary = Text()
+        summary.append('Requested: ', style='bold')
+        summary.append(str(requested))
+        summary.append(' | Deleted: ', style='bold green')
+        summary.append(str(deleted), style='green')
+        summary.append(' | Failed: ', style='bold red')
+        summary.append(str(len(failed)), style='red')
+        console.print(Panel(summary, title='Job Delete Summary'))
 
-        status_text.append("Running: ", style="bold")
-        status_text.append(f"{running.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        if failed:
+            failed_text = Text()
+            for job_id, err in failed:
+                failed_text.append(f"- {job_id}: {err}\n")
+            console.print(Panel(failed_text, title='Failed Deletes'))
 
-        status_text.append("Completed: ", style="bold")
-        status_text.append(f"{completed.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    def render_submit_response(self, result, console=None):
+        """Render submit response in rich format and return parsed outcome."""
+        console = console or Console()
 
-        status_text.append("Error code: ", style="bold red")
-        status_text.append(f"{status['error_code']}\n")
+        if isinstance(result, dict) and result.get('job_name'):
+            status = str(result.get('status', 'Unknown'))
+            status_style = self.STATUS_STYLES.get(status.capitalize(), 'white')
+            created_str = self._format_unix_timestamp(result.get('created_at'))
 
-        status_text.append("Error message: ", style="bold red")
-        status_text.append(status['error_message'])
+            info = Text()
+            info.append('Job ID: ', style='bold')
+            info.append(f"{result.get('job_name')}\n")
+            info.append('Status: ', style='bold')
+            info.append(f"{status}\n", style=status_style)
+            info.append('Created: ', style='bold')
+            info.append(created_str)
 
-        panel = Panel(status_text, title="Job Status")
-        return console.print(panel)
+            console.print(Panel(info, title='Job Submitted'))
+            return {'recognized': True, 'job_id': str(result.get('job_name'))}
+
+        console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title='Submit Response'))
+        return {'recognized': False, 'job_id': None}
 
     @staticmethod
     def _format_job_datetime(dt_raw):
@@ -1332,7 +1457,52 @@ class CloudRuAPIClient:
         except (TypeError, ValueError):
             return duration_raw or 'Unknown'
 
-    def _render_jobs_table(self, jobs_data, table_title, time_column, time_getter, table_width=160):
+    @staticmethod
+    def _parse_api_datetime(dt_raw):
+        if not dt_raw:
+            return datetime.fromtimestamp(0)
+        try:
+            return datetime.strptime(dt_raw, '%Y-%m-%dT%H:%M:%SZ')
+        except (TypeError, ValueError):
+            return datetime.fromtimestamp(0)
+
+    @staticmethod
+    def _job_finished_dt_raw(job):
+        return job.get('completed_dt') or job.get('updated_dt') or job.get('created_dt')
+
+    def _normalize_job_row(self, job, primary_time_raw, primary_time_display):
+        created_dt_raw = job.get('created_dt')
+        finished_dt_raw = self._job_finished_dt_raw(job)
+        gpu_count_raw = job.get('gpu_count', 0)
+        try:
+            gpu_count = int(gpu_count_raw)
+        except (TypeError, ValueError):
+            gpu_count = 0
+        return {
+            'time': primary_time_display,
+            'time_raw': primary_time_raw,
+            'time_display': primary_time_display,
+            'created_dt_raw': created_dt_raw,
+            'created_dt_display': self._format_job_datetime(created_dt_raw),
+            'finished_dt_raw': finished_dt_raw,
+            'finished_dt_display': self._format_job_datetime(finished_dt_raw),
+            'job_id': job.get('job_name', ''),
+            'status': job.get('status', ''),
+            'region': job.get('region', ''),
+            'gpu_count': gpu_count,
+            'gpus': str(gpu_count),
+            'job_desc': job.get('job_desc', ''),
+            'description': job.get('job_desc', ''),
+            'cost_raw': job.get('cost', 0.0),
+            'cost_display': self._format_job_cost(job.get('cost', 0.0)),
+            'cost': self._format_job_cost(job.get('cost', 0.0)),
+            'duration_raw': job.get('duration', ''),
+            'duration_display': self._format_job_duration(job.get('duration', '')),
+            'duration': self._format_job_duration(job.get('duration', '')),
+        }
+
+    def _render_jobs_table(self, jobs_data, table_title, time_column, time_getter, time_raw_getter,
+                           table_width=160, show_table=True):
         table = Table(title=table_title)
         table.add_column(time_column, justify='left', style='cyan')
         table.add_column('Job ID', no_wrap=True, justify='left', style='magenta')
@@ -1347,53 +1517,66 @@ class CloudRuAPIClient:
         for job in jobs_data:
             status = job.get('status', '')
             status_style = self.STATUS_STYLES.get(status, 'white')
+            time_raw = time_raw_getter(job)
             time_value = time_getter(job)
-
-            row = {
-                'time': time_value,
-                'job_id': job.get('job_name', ''),
-                'status': status,
-                'region': job.get('region', ''),
-                'gpus': str(job.get('gpu_count', '0')),
-                'description': job.get('job_desc', ''),
-                'cost': self._format_job_cost(job.get('cost', 0.0)),
-                'duration': self._format_job_duration(job.get('duration', '')),
-            }
+            row = self._normalize_job_row(job, primary_time_raw=time_raw, primary_time_display=time_value)
             rendered_rows.append(row)
 
-            table.add_row(
-                row['time'],
-                row['job_id'],
-                f"[{status_style}]{row['status']}[/{status_style}]",
-                row['region'],
-                row['gpus'],
-                row['description'],
-                row['cost'],
-                row['duration'],
-            )
+            if show_table:
+                table.add_row(
+                    row['time'],
+                    row['job_id'],
+                    f"[{status_style}]{row['status']}[/{status_style}]",
+                    row['region'],
+                    row['gpus'],
+                    row['description'],
+                    row['cost'],
+                    row['duration'],
+                )
 
-        console = Console(width=table_width)
-        console.print(table)
+        if show_table:
+            console = Console(width=table_width)
+            console.print(table)
         return rendered_rows
 
-    def jobs(self, status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160):
-        """Display a formatted table of jobs sorted by creation date"""
+    def jobs(self, status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160,
+             return_data=False, show_table=True):
+        """Display jobs sorted by creation date.
+
+        Args:
+            status_in (list[str], optional): Status filter include list.
+            status_not_in (list[str], optional): Status exclude list.
+            regions (list[str], optional): Regions to query.
+            n_last (int, optional): Max jobs to fetch per region.
+            table_width (int, optional): Console table width.
+            return_data (bool, optional): Return normalized rows.
+            show_table (bool, optional): Print rich table output.
+
+        Returns:
+            list[dict] | None: Normalized rows when return_data=True.
+        """
         jobs_data = []
         for region in regions:
             jobs_data += self._get_jobs(region=region, offset=0, limit=n_last, status_in=status_in,
                                         status_not_in=status_not_in)
-        jobs_data = sorted(jobs_data, key=lambda x: x['created_dt'], reverse=True)
+        jobs_data = sorted(jobs_data, key=lambda x: self._parse_api_datetime(x.get('created_dt')), reverse=True)
 
         workspace_label = self._workspace_title_label()
-        self._render_jobs_table(
+        rendered_rows = self._render_jobs_table(
             jobs_data=jobs_data,
             table_title=f'Jobs (Workspace: {workspace_label})',
             time_column='Created',
             time_getter=lambda job: self._format_job_datetime(job.get('created_dt')),
+            time_raw_getter=lambda job: job.get('created_dt'),
             table_width=table_width,
+            show_table=show_table,
         )
+        if return_data:
+            return rendered_rows
+        return None
 
-    def finished_jobs(self, regions=['SR006'], n_last=1000, status_in=None, table_width=160, return_data=False):
+    def finished_jobs(self, regions=['SR006'], n_last=1000, status_in=None, table_width=160,
+                      return_data=False, show_table=True):
         """Display recently finished jobs with completion time.
 
         Args:
@@ -1402,6 +1585,7 @@ class CloudRuAPIClient:
             status_in (list[str] | None, optional): Terminal statuses to include.
             table_width (int, optional): Console table width.
             return_data (bool, optional): Return rows instead of only printing.
+            show_table (bool, optional): Print rich table output.
         """
         statuses = self.TERMINAL_JOB_STATUSES if not status_in else status_in
 
@@ -1409,28 +1593,17 @@ class CloudRuAPIClient:
         for region in regions:
             jobs_data += self._get_jobs(region=region, offset=0, limit=n_last, status_in=statuses, status_not_in=[])
 
-        def _parse_job_dt(job):
-            for key in ['completed_dt', 'updated_dt', 'created_dt']:
-                value = job.get(key)
-                if not value:
-                    continue
-                try:
-                    return datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ')
-                except (TypeError, ValueError):
-                    continue
-            return datetime.fromtimestamp(0)
-
-        jobs_data = sorted(jobs_data, key=_parse_job_dt, reverse=True)
+        jobs_data = sorted(jobs_data, key=lambda job: self._parse_api_datetime(self._job_finished_dt_raw(job)), reverse=True)
 
         workspace_label = self._workspace_title_label()
         rendered_rows = self._render_jobs_table(
             jobs_data=jobs_data,
             table_title=f'Finished Jobs (Workspace: {workspace_label})',
             time_column='Finished',
-            time_getter=lambda job: self._format_job_datetime(
-                job.get('completed_dt') or job.get('updated_dt') or job.get('created_dt')
-            ),
+            time_getter=lambda job: self._format_job_datetime(self._job_finished_dt_raw(job)),
+            time_raw_getter=lambda job: self._job_finished_dt_raw(job),
             table_width=table_width,
+            show_table=show_table,
         )
 
         if return_data:

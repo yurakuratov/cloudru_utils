@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -214,28 +213,34 @@ class CloudruBotRunner:
 
         for profile in self.profiles:
             client = self.clients[profile]
-            for region in self._profile_regions(profile):
-                try:
-                    jobs = client._get_jobs(region=region, offset=0, limit=500, status_in=[], status_not_in=[])
-                except Exception as exc:
-                    if self.debug:
-                        print(f"[bot] jobs fetch failed profile={profile} region={region}: {exc}")
-                    continue
+            try:
+                rows = client.jobs(
+                    status_in=[],
+                    status_not_in=[],
+                    regions=self._profile_regions(profile),
+                    n_last=500,
+                    return_data=True,
+                    show_table=False,
+                ) or []
+            except Exception as exc:
+                if self.debug:
+                    print(f"[bot] jobs fetch failed profile={profile}: {exc}")
+                continue
 
-                for job in jobs:
-                    job_id = str(job.get("job_name", ""))
-                    if not job_id:
-                        continue
-                    key = f"{profile}:{job_id}"
-                    current[key] = {
-                        "profile": profile,
-                        "workspace": self.workspace_name.get(profile, "Unknown workspace"),
-                        "region": job.get("region", region),
-                        "job_id": job_id,
-                        "job_desc": str(job.get("job_desc") or "-").strip() or "-",
-                        "status": str(job.get("status", "Unknown")),
-                        "gpu_count": job.get("gpu_count", 0),
-                    }
+            for row in rows:
+                job_id = str(row.get("job_id") or "")
+                if not job_id:
+                    continue
+                key = f"{profile}:{job_id}"
+                current[key] = {
+                    "profile": profile,
+                    "workspace": self.workspace_name.get(profile, "Unknown workspace"),
+                    "region": row.get("region", ""),
+                    "job_id": job_id,
+                    "job_desc": str(row.get("job_desc") or "-").strip() or "-",
+                    "status": str(row.get("status", "Unknown")),
+                    "gpu_count": int(row.get("gpu_count", 0) or 0),
+                }
 
         initialized = bool(self.state.get("initialized", False))
         if not initialized:
@@ -340,52 +345,59 @@ class CloudruBotRunner:
 
     def _format_jobs_summary(self, profile: str, n: int = 5, finished: bool = False) -> str:
         client = self.clients[profile]
-        rows = []
-        status_filter = CloudRuAPIClient.TERMINAL_JOB_STATUSES if finished else []
-        for region in self._profile_regions(profile):
-            rows.extend(client._get_jobs(region=region, offset=0, limit=max(n, 20), status_in=status_filter, status_not_in=[]))
-        key = "completed_dt" if finished else "created_dt"
-        rows = sorted(rows, key=lambda x: x.get(key, ""), reverse=True)[:n]
+        if finished:
+            rows = client.finished_jobs(
+                regions=self._profile_regions(profile),
+                n_last=max(n, 20),
+                status_in=CloudRuAPIClient.TERMINAL_JOB_STATUSES,
+                return_data=True,
+                show_table=False,
+            ) or []
+        else:
+            rows = client.jobs(
+                status_in=[],
+                status_not_in=[],
+                regions=self._profile_regions(profile),
+                n_last=max(n, 20),
+                return_data=True,
+                show_table=False,
+            ) or []
+        rows = rows[:n]
         header = "recent finished jobs" if finished else "recent jobs"
         lines = [f"[{profile}/{self.workspace_name.get(profile, 'Unknown workspace')}] {header}:"]
-        for job in rows:
-            desc = str(job.get('job_desc') or '-').strip()
+        for row in rows:
+            desc = str(row.get('job_desc') or '-').strip()
             if finished:
-                time_raw = job.get('completed_dt') or job.get('updated_dt') or job.get('created_dt')
+                time_str = str(row.get('finished_dt_display') or row.get('time_display') or 'unknown')
                 time_label = 'finished'
             else:
-                time_raw = job.get('created_dt')
+                time_str = str(row.get('created_dt_display') or row.get('time_display') or 'unknown')
                 time_label = 'started'
-            time_str = self._format_dt_short(time_raw)
             lines.append(
-                f"- {job.get('status')} | {time_label}={time_str} | {desc} | gpus={job.get('gpu_count', 0)} | id={job.get('job_name')}"
+                f"- {row.get('status')} | {time_label}={time_str} | {desc} | gpus={row.get('gpu_count', 0)} | id={row.get('job_id')}"
             )
         return "\n".join(lines) if lines else f"[{profile}] no jobs found"
 
-    def _format_running_jobs_summary(self, profile: str, n: int = 5) -> str:
+    def _format_running_jobs_summary(self, profile: str, n: int = 5) -> tuple[str, int]:
         client = self.clients[profile]
-        rows = []
-        for region in self._profile_regions(profile):
-            rows.extend(client._get_jobs(region=region, offset=0, limit=max(n, 20), status_in=['Running'], status_not_in=[]))
-        rows = sorted(rows, key=lambda x: x.get('created_dt', ''), reverse=True)[:n]
-        lines = [f"[{profile}/{self.workspace_name.get(profile, 'Unknown workspace')}] running jobs:"]
-        for job in rows:
-            desc = str(job.get('job_desc') or '-').strip()
-            started = self._format_dt_short(job.get('created_dt'))
+        rows = client.jobs(
+            status_in=['Running'],
+            status_not_in=[],
+            regions=self._profile_regions(profile),
+            n_last=max(n, 20),
+            return_data=True,
+            show_table=False,
+        ) or []
+        rows = rows[:n]
+        running_count = len(rows)
+        lines = [f"[{profile}/{self.workspace_name.get(profile, 'Unknown workspace')}] running jobs: {running_count}"]
+        for row in rows:
+            desc = str(row.get('job_desc') or '-').strip()
+            started = str(row.get('created_dt_display') or row.get('time_display') or 'unknown')
             lines.append(
-                f"- started={started} | {desc} | gpus={job.get('gpu_count', 0)} | id={job.get('job_name')}"
+                f"- started={started} | {desc} | gpus={row.get('gpu_count', 0)} | id={row.get('job_id')}"
             )
-        return "\n".join(lines) if lines else f"[{profile}] no running jobs"
-
-    @staticmethod
-    def _format_dt_short(dt_raw: str | None) -> str:
-        if not dt_raw:
-            return 'unknown'
-        try:
-            dt = datetime.strptime(dt_raw, '%Y-%m-%dT%H:%M:%SZ')
-            return dt.strftime('%m-%d %H:%M')
-        except Exception:
-            return str(dt_raw)
+        return "\n".join(lines), running_count
 
     @staticmethod
     def _help_text() -> str:
@@ -413,8 +425,8 @@ class CloudruBotRunner:
         for profile in profiles:
             client = self.clients[profile]
             try:
-                status = client._get_job_status(job_id)
-                if isinstance(status, dict) and status.get("job_name"):
+                status = client.job_status(job_id, return_data=True, show_output=False)
+                if isinstance(status, dict) and status.get("job_id"):
                     matches.append(profile)
             except Exception:
                 continue
@@ -452,10 +464,10 @@ class CloudruBotRunner:
                 return f"Job found in multiple profiles: {profiles_list}. Use /status {job_id} <profile>.", None
 
             profile = matches[0]
-            status = self.clients[profile]._get_job_status(job_id)
+            status = self.clients[profile].job_status(job_id, return_data=True, show_output=False) or {}
             return (
                 f"[{profile}/{self.workspace_name.get(profile, 'Unknown workspace')}]\n"
-                f"Job: {status.get('job_name')}\n"
+                f"Job: {status.get('job_id')}\n"
                 f"Status: {status.get('status')}\n"
                 f"Error: {status.get('error_code')} {status.get('error_message', '')}"
             ), None
@@ -475,7 +487,7 @@ class CloudruBotRunner:
                 client = self.clients[profile]
                 region = self._profile_regions(profile)[0]
                 try:
-                    lines = [line for line in client._get_job_logs(job_id, tail=tail, verbose=False, region=region)]
+                    lines = client.job_logs(job_id, tail=tail, verbose=False, region=region, return_data=True, show_output=False) or []
                     if lines:
                         out = "\n".join(lines)
                         return _truncate(f"[{profile}/{self.workspace_name.get(profile, 'Unknown workspace')}]\n" + _split_lines(out, 50)), None
@@ -734,7 +746,16 @@ class CloudruBotRunner:
 
             if data == "a:jobs:running":
                 profiles = self._scope_profiles(chat_id, default_all=True)
-                return _truncate("\n\n".join(self._format_running_jobs_summary(p, n=10) for p in profiles)), self._menu_jobs()
+                blocks = []
+                total_running = 0
+                for profile in profiles:
+                    block, count = self._format_running_jobs_summary(profile, n=10)
+                    blocks.append(block)
+                    total_running += count
+                text = f"Total running jobs: {total_running}"
+                if blocks:
+                    text += "\n\n" + "\n\n".join(blocks)
+                return _truncate(text), self._menu_jobs()
 
             if data == "a:jobs:status":
                 ctx["pending"] = {"action": "jobs_status"}
