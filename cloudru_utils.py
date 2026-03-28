@@ -833,7 +833,7 @@ class CloudRuAPIClient:
         match = re.search(r'(\d+(?:\.\d+)?)\s*(?:v)?CPU(?:-cores)?', instance_type_name, flags=re.IGNORECASE)
         return float(match.group(1)) if match else 0.0
 
-    def instance_types(self, region=None, refresh_configs=False, table_width=160, return_data=False):
+    def instance_types(self, region=None, refresh_configs=False, table_width=160, return_data=False, show_table=True):
         """Show supported instance types for selected region.
 
         Args:
@@ -841,6 +841,7 @@ class CloudRuAPIClient:
             refresh_configs (bool, optional): Force refresh of /configs cache.
             table_width (int, optional): Console table width.
             return_data (bool, optional): If True, returns parsed rows. Defaults to False.
+            show_table (bool, optional): Print rich table output. Defaults to True.
 
         Returns:
             list[dict] | None: Sorted rows with instance type info when return_data=True.
@@ -940,17 +941,18 @@ class CloudRuAPIClient:
                 row['instance_name'],
             )
 
-        if rows:
-            console.print(table)
-        else:
-            console.print(Panel(f'No instance types found for region {region_key}.', title='Instance Types'))
+        if show_table:
+            if rows:
+                console.print(table)
+            else:
+                console.print(Panel(f'No instance types found for region {region_key}.', title='Instance Types'))
 
         if return_data:
             return rows
         return None
 
     def available_resources(self, allocation_id=None, only_available=True, refresh_workspace=False, table_width=160,
-                            return_data=False, source='auto'):
+                            return_data=False, source='auto', show_table=True):
         """Show current allocation resource availability in sorted rich tables.
 
         Args:
@@ -963,6 +965,7 @@ class CloudRuAPIClient:
                 - 'auto': try instance_types/{region}/available first, fallback to allocations endpoint
                 - 'instance_types_available': use only /instance_types/{region}/available
                 - 'allocations_instance_types_availability': use only /allocations/{id}/instance_types_availability
+            show_table (bool, optional): Print rich table output. Defaults to True.
 
         Returns:
             dict[str, list[dict]] | None: Sorted rows by allocation when return_data=True.
@@ -991,12 +994,14 @@ class CloudRuAPIClient:
 
         if allocation_id is None:
             if not self._workspace_allocations_cache:
-                console.print(Panel('No allocations found for current workspace.', title='Available Resources'))
+                if show_table:
+                    console.print(Panel('No allocations found for current workspace.', title='Available Resources'))
                 return {} if return_data else None
 
             allocation_ids = [allocation.get('id') for allocation in self._workspace_allocations_cache if allocation.get('id')]
             if not allocation_ids:
-                console.print(Panel('No valid allocation IDs found in workspace.', title='Available Resources'))
+                if show_table:
+                    console.print(Panel('No valid allocation IDs found in workspace.', title='Available Resources'))
                 return {} if return_data else None
         else:
             allocation_ids = [allocation_id]
@@ -1005,7 +1010,8 @@ class CloudRuAPIClient:
 
         for current_allocation_id in allocation_ids:
             if not current_allocation_id:
-                console.print(Panel('Allocation ID is empty. Provide allocation_id explicitly.', title='Available Resources'))
+                if show_table:
+                    console.print(Panel('Allocation ID is empty. Provide allocation_id explicitly.', title='Available Resources'))
                 continue
 
             allocation_meta = allocation_meta_by_id.get(current_allocation_id, {})
@@ -1067,7 +1073,8 @@ class CloudRuAPIClient:
                     endpoint_errors.append(old_data)
 
             if not normalized and endpoint_errors:
-                console.print(Panel(str(endpoint_errors[-1]), title=f'Available Resources Error ({current_allocation_id})'))
+                if show_table:
+                    console.print(Panel(str(endpoint_errors[-1]), title=f'Available Resources Error ({current_allocation_id})'))
                 all_results[current_allocation_id] = []
                 continue
 
@@ -1120,19 +1127,20 @@ class CloudRuAPIClient:
                     row['instance_name'],
                 )
 
-            if normalized:
-                console.print(table)
-            else:
-                message = 'No rows to display.'
-                if only_available:
-                    message = 'No currently available resources (all rows have available=0).'
-                console.print(Panel(
-                    message,
-                    title=(
-                        f'Available Resources (Workspace: {workspace_label}, '
-                        f'Allocation: {current_allocation_id})'
-                    ),
-                ))
+            if show_table:
+                if normalized:
+                    console.print(table)
+                else:
+                    message = 'No rows to display.'
+                    if only_available:
+                        message = 'No currently available resources (all rows have available=0).'
+                    console.print(Panel(
+                        message,
+                        title=(
+                            f'Available Resources (Workspace: {workspace_label}, '
+                            f'Allocation: {current_allocation_id})'
+                        ),
+                    ))
 
             all_results[current_allocation_id] = normalized
 

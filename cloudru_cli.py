@@ -19,13 +19,14 @@ from cloudru_config import (
     CONFIG_PATH,
     CREDENTIALS_PATH,
     file_mode,
-    list_profiles,
+    list_auth_profiles,
     load_cached_token,
     load_profile,
     redact,
     save_cached_token,
     save_profile,
 )
+from cloudru_bot import run_bot
 from cloudru_utils import CloudRuAPIClient
 
 
@@ -61,10 +62,12 @@ app = typer.Typer(help="Cloud.ru jobs helper CLI", no_args_is_help=True, add_com
 workspace_app = typer.Typer(help="Workspace commands", no_args_is_help=True)
 resources_app = typer.Typer(help="Resources commands", no_args_is_help=True)
 jobs_app = typer.Typer(help="Jobs commands", no_args_is_help=True)
+bot_app = typer.Typer(help="Telegram bot commands", no_args_is_help=True)
 
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(resources_app, name="resources")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(bot_app, name="bot")
 
 
 def _prompt(label: str, default: str | None = None, secret: bool = False) -> str:
@@ -381,7 +384,7 @@ def cmd_used_resources(
             client.used_resources(regions=regions, n_last=n, table_width=table_width)
             return
 
-        profiles = list_profiles()
+        profiles = list_auth_profiles()
         if not profiles:
             raise RuntimeError("No profiles found. Run `cloudru init --profile <name>` first.")
 
@@ -786,6 +789,21 @@ def cmd_jobs_submit(
             console.print(f"Next: cloudru jobs logs {result.get('job_name')}")
         else:
             console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Submit Response"))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@bot_app.command("run", help="Run Telegram bot with polling and notifications")
+def cmd_bot_run(
+    ctx: typer.Context,
+    profile: Optional[str] = typer.Option(None, "--profile", help="Single profile mode"),
+    all_profiles: bool = typer.Option(True, "--all/--no-all", help="Use all configured profiles by default"),
+    poll_interval: Optional[int] = typer.Option(None, "--poll-interval", min=10, help="Polling interval seconds"),
+    debug: bool = typer.Option(False, "--debug", help="Show debug logs"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        run_bot(profile=profile, all_profiles=all_profiles, poll_interval_sec=poll_interval, debug=debug_mode)
     except Exception as exc:
         _fail(exc, debug_mode)
 

@@ -10,6 +10,7 @@ CONFIG_DIR = Path.home() / ".cloudru"
 CONFIG_PATH = CONFIG_DIR / "config"
 CREDENTIALS_PATH = CONFIG_DIR / "credentials"
 TOKEN_CACHE_PATH = CONFIG_DIR / "token_cache"
+TELEGRAM_CONFIG_PATH = CONFIG_DIR / "telegram.ini"
 
 
 def _read_ini(path: Path) -> configparser.ConfigParser:
@@ -32,6 +33,8 @@ def ensure_storage() -> None:
         CREDENTIALS_PATH.touch()
     if not TOKEN_CACHE_PATH.exists():
         TOKEN_CACHE_PATH.touch()
+    if not TELEGRAM_CONFIG_PATH.exists():
+        TELEGRAM_CONFIG_PATH.touch()
 
     try:
         CREDENTIALS_PATH.chmod(0o600)
@@ -161,6 +164,72 @@ def list_profiles() -> list[str]:
     credentials = _read_ini(CREDENTIALS_PATH)
     profiles = set(config.sections()) | set(credentials.sections())
     return sorted(profiles)
+
+
+def list_auth_profiles() -> list[str]:
+    """Return profile names that have cloudru auth credentials."""
+    ensure_storage()
+    credentials = _read_ini(CREDENTIALS_PATH)
+    profiles = []
+    for profile in credentials.sections():
+        section = credentials[profile]
+        if section.get("client_id") and section.get("client_secret"):
+            profiles.append(profile)
+    return sorted(set(profiles))
+
+
+def _parse_csv_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(',') if item.strip()]
+
+
+def load_bot_config() -> dict:
+    """Load Telegram bot config from dedicated INI file and env vars.
+
+    File source:
+    - ~/.cloudru/telegram.ini
+
+    INI schema:
+      [bot]
+      token=...
+      allowed_chat_ids=123,-100...
+      poll_interval_sec=60
+
+    Env var overrides:
+    - CLOUDRU_TELEGRAM_BOT_TOKEN
+    - CLOUDRU_TELEGRAM_ALLOWED_CHAT_IDS
+    - CLOUDRU_TELEGRAM_POLL_INTERVAL_SEC
+    """
+    ensure_storage()
+    telegram_cfg = _read_ini(TELEGRAM_CONFIG_PATH)
+    token = None
+    allowed_chat_ids_raw = None
+    poll_interval_raw = None
+    if telegram_cfg.has_section('bot'):
+        bot = telegram_cfg['bot']
+        token = bot.get('token')
+        allowed_chat_ids_raw = bot.get('allowed_chat_ids')
+        poll_interval_raw = bot.get('poll_interval_sec')
+
+    token = os.getenv('CLOUDRU_TELEGRAM_BOT_TOKEN', token)
+    allowed_chat_ids_raw = os.getenv('CLOUDRU_TELEGRAM_ALLOWED_CHAT_IDS', allowed_chat_ids_raw)
+    poll_interval_raw = os.getenv('CLOUDRU_TELEGRAM_POLL_INTERVAL_SEC', poll_interval_raw)
+
+    allowed_chat_ids = _parse_csv_list(allowed_chat_ids_raw)
+
+    poll_interval_sec = 60
+    try:
+        if poll_interval_raw is not None and str(poll_interval_raw).strip() != '':
+            poll_interval_sec = max(10, int(float(poll_interval_raw)))
+    except (TypeError, ValueError):
+        poll_interval_sec = 60
+
+    return {
+        'telegram_bot_token': token,
+        'telegram_allowed_chat_ids': allowed_chat_ids,
+        'telegram_poll_interval_sec': poll_interval_sec,
+    }
 
 
 def redact(value: str | None, keep: int = 4) -> str:
