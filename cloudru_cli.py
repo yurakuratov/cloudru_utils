@@ -371,7 +371,7 @@ def cmd_used_resources(
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
     all_profiles: bool = typer.Option(False, "--all", help="Collect from all configured profiles"),
     n: int = typer.Option(1000, "--n", min=1),
-    table_width: int = typer.Option(160, "--table-width"),
+    table_width: int = typer.Option(120, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
