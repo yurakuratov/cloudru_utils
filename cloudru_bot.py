@@ -90,7 +90,15 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        STATE_PATH.parent.chmod(0o700)
+    except Exception:
+        pass
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        STATE_PATH.chmod(0o600)
+    except Exception:
+        pass
 
 
 def _build_client(profile: str) -> tuple[CloudRuAPIClient, dict]:
