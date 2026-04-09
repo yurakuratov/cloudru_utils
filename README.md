@@ -80,6 +80,7 @@ cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs kill lm-mpi-job-xxxx lm-mpi-job-yyyy --yes
+cloudru bot run
 ```
 
 Example `job.yaml` for CLI submit (setup + run are submitted as one job command):
@@ -148,6 +149,43 @@ Config files:
 Profile selection:
 - `--profile`
 - `CLOUDRU_PROFILE`
+
+## Telegram Bot (local run)
+
+You can run a local Telegram bot process that monitors all configured profiles and sends notifications
+when job statuses change (poll interval default is 60s).
+
+Configure bot settings in a dedicated file `~/.cloudru/telegram.ini`:
+
+```ini
+[bot]
+token=YOUR_TELEGRAM_BOT_TOKEN
+allowed_chat_ids=123456789
+poll_interval_sec=60
+```
+
+Optional env overrides:
+- `CLOUDRU_TELEGRAM_BOT_TOKEN`
+- `CLOUDRU_TELEGRAM_ALLOWED_CHAT_IDS`
+- `CLOUDRU_TELEGRAM_POLL_INTERVAL_SEC`
+
+Run bot:
+
+```bash
+cloudru bot run
+```
+
+Bot UX is menu-based with Telegram inline buttons and submenus that mirror CLI hierarchy (`workspace`, `resources`, `jobs`).
+Text commands are still supported as a fallback.
+
+Useful bot commands:
+- `/help`
+- `/jobs [n] [profile]`
+- `/status <job_id> [profile]`
+- `/logs <job_id> [tail] [profile]`
+- `/resources_used [profile|all]`
+- `/resources_available [profile|all] [region]`
+- `/instance_types [profile|all] [region]`
 
 ## Python API Quick Start
 

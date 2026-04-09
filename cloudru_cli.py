@@ -6,7 +6,6 @@ import os
 import shlex
 import traceback
 from typing import Optional
-from datetime import datetime
 
 import typer
 import yaml
@@ -19,13 +18,14 @@ from cloudru_config import (
     CONFIG_PATH,
     CREDENTIALS_PATH,
     file_mode,
-    list_profiles,
+    list_auth_profiles,
     load_cached_token,
     load_profile,
     redact,
     save_cached_token,
     save_profile,
 )
+from cloudru_bot import run_bot
 from cloudru_utils import CloudRuAPIClient
 
 
@@ -61,10 +61,12 @@ app = typer.Typer(help="Cloud.ru jobs helper CLI", no_args_is_help=True, add_com
 workspace_app = typer.Typer(help="Workspace commands", no_args_is_help=True)
 resources_app = typer.Typer(help="Resources commands", no_args_is_help=True)
 jobs_app = typer.Typer(help="Jobs commands", no_args_is_help=True)
+bot_app = typer.Typer(help="Telegram bot commands", no_args_is_help=True)
 
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(resources_app, name="resources")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(bot_app, name="bot")
 
 
 def _prompt(label: str, default: str | None = None, secret: bool = False) -> str:
@@ -369,7 +371,7 @@ def cmd_used_resources(
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
     all_profiles: bool = typer.Option(False, "--all", help="Collect from all configured profiles"),
     n: int = typer.Option(1000, "--n", min=1),
-    table_width: int = typer.Option(160, "--table-width"),
+    table_width: int = typer.Option(120, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
@@ -381,7 +383,7 @@ def cmd_used_resources(
             client.used_resources(regions=regions, n_last=n, table_width=table_width)
             return
 
-        profiles = list_profiles()
+        profiles = list_auth_profiles()
         if not profiles:
             raise RuntimeError("No profiles found. Run `cloudru init --profile <name>` first.")
 
@@ -596,70 +598,18 @@ def cmd_jobs_kill(
         for job_id in job_ids:
             try:
                 result = client.kill_job(job_id, region=target_region)
-
-                if isinstance(result, dict) and result.get("job_name"):
-                    status_raw = str(result.get("status", "Unknown"))
-                    status = status_raw.capitalize()
-                    status_style = CloudRuAPIClient.STATUS_STYLES.get(
-                        status,
-                        "cyan" if status.lower() == "deleted" else "white",
-                    )
-
-                    deleted_at_raw = result.get("deleted_at")
-                    deleted_at_str = "Unknown"
-                    try:
-                        if deleted_at_raw is not None:
-                            deleted_at_str = datetime.fromtimestamp(float(deleted_at_raw)).strftime("%Y-%m-%d %H:%M:%S")
-                    except (TypeError, ValueError, OSError):
-                        deleted_at_str = str(deleted_at_raw)
-
-                    error_code = result.get("error_code", "Unknown")
-                    error_message = str(result.get("error_message", ""))
-
-                    status_text = Text()
-                    status_text.append("Job ID: ", style="bold")
-                    status_text.append(f"{result.get('job_name')}\n")
-
-                    status_text.append("Status: ", style="bold")
-                    status_text.append(f"{status}\n", style=status_style)
-
-                    status_text.append("Deleted: ", style="bold")
-                    status_text.append(f"{deleted_at_str}\n")
-
-                    status_text.append("Error code: ", style="bold red")
-                    status_text.append(f"{error_code}\n")
-
-                    status_text.append("Error message: ", style="bold red")
-                    status_text.append(error_message)
-
-                    console.print(Panel(status_text, title="Job Delete Status"))
-
-                    if str(error_code) in {"0", "0.0"} and status.lower() == "deleted":
-                        deleted_count += 1
-                    else:
-                        failed.append((job_id, f"error_code={error_code}, status={status}, error_message={error_message}"))
+                parsed = client.render_job_delete_response(result, console=console)
+                if parsed.get("ok"):
+                    deleted_count += 1
                 else:
-                    console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Job Delete Response"))
-                    failed.append((job_id, "unexpected response format"))
+                    failed.append((job_id, parsed.get("error_summary", "delete failed")))
             except Exception as exc:
                 if debug_mode:
                     traceback.print_exc()
                 failed.append((job_id, str(exc)))
 
-        summary = Text()
-        summary.append("Requested: ", style="bold")
-        summary.append(str(len(job_ids)))
-        summary.append(" | Deleted: ", style="bold green")
-        summary.append(str(deleted_count), style="green")
-        summary.append(" | Failed: ", style="bold red")
-        summary.append(str(len(failed)), style="red")
-        console.print(Panel(summary, title="Job Delete Summary"))
-
+        client.render_job_delete_summary(requested=len(job_ids), deleted=deleted_count, failed=failed, console=console)
         if failed:
-            failed_text = Text()
-            for job_id, err in failed:
-                failed_text.append(f"- {job_id}: {err}\n")
-            console.print(Panel(failed_text, title="Failed Deletes"))
             raise typer.Exit(1)
     except Exception as exc:
         _fail(exc, debug_mode)
@@ -761,31 +711,26 @@ def cmd_jobs_submit(
             return
 
         console = Console()
-        if isinstance(result, dict) and result.get("job_name"):
-            status = str(result.get("status", "Unknown"))
-            status_style = CloudRuAPIClient.STATUS_STYLES.get(status.capitalize(), "white")
+        parsed = client.render_submit_response(result, console=console)
+        job_name = parsed.get("job_id")
+        if job_name:
+            console.print(f"Next: cloudru jobs status {job_name}")
+            console.print(f"Next: cloudru jobs logs {job_name}")
+    except Exception as exc:
+        _fail(exc, debug_mode)
 
-            created_at = result.get("created_at")
-            created_str = "Unknown"
-            try:
-                if created_at is not None:
-                    created_str = datetime.fromtimestamp(float(created_at)).strftime("%Y-%m-%d %H:%M:%S")
-            except (TypeError, ValueError, OSError):
-                created_str = str(created_at)
 
-            info = Text()
-            info.append("Job ID: ", style="bold")
-            info.append(f"{result.get('job_name')}\n")
-            info.append("Status: ", style="bold")
-            info.append(f"{status}\n", style=status_style)
-            info.append("Created: ", style="bold")
-            info.append(created_str)
-
-            console.print(Panel(info, title="Job Submitted"))
-            console.print(f"Next: cloudru jobs status {result.get('job_name')}")
-            console.print(f"Next: cloudru jobs logs {result.get('job_name')}")
-        else:
-            console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title="Submit Response"))
+@bot_app.command("run", help="Run Telegram bot with polling and notifications")
+def cmd_bot_run(
+    ctx: typer.Context,
+    profile: Optional[str] = typer.Option(None, "--profile", help="Single profile mode"),
+    all_profiles: bool = typer.Option(True, "--all/--no-all", help="Use all configured profiles by default"),
+    poll_interval: Optional[int] = typer.Option(None, "--poll-interval", min=10, help="Polling interval seconds"),
+    debug: bool = typer.Option(False, "--debug", help="Show debug logs"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        run_bot(profile=profile, all_profiles=all_profiles, poll_interval_sec=poll_interval, debug=debug_mode)
     except Exception as exc:
         _fail(exc, debug_mode)
 
