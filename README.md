@@ -78,6 +78,10 @@ cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
 cloudru jobs submit -f job.yaml --json
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key --dry-run
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs kill lm-mpi-job-xxxx lm-mpi-job-yyyy --yes
 cloudru bot run
@@ -149,6 +153,26 @@ Config files:
 Profile selection:
 - `--profile`
 - `CLOUDRU_PROFILE`
+
+### Connect to a running job over SSH
+
+`cloudru jobs ssh` connects to rank 0 (the master pod) by default. Use `--rank N` to connect to another rank; rank 1 maps to `mpiworker-0`, rank 2 to `mpiworker-1`, and so on.
+
+```bash
+# Use ssh-agent or OpenSSH's default identities
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# Use an explicit private key
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key
+
+# Connect to the first worker pod
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key
+
+# Resolve and print the exact command without starting SSH
+cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key --dry-run
+```
+
+The job must be in `Running` status. The CLI obtains the workspace namespace and region-specific SSH gateway from Cloud.ru, then starts the local OpenSSH client interactively.
 
 ## Telegram Bot (local run)
 
@@ -262,6 +286,7 @@ cloud_client.kill_job(job_id, region="SR006")
 - `jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160)`
 - `finished_jobs(regions=['SR006'], n_last=1000, status_in=None, table_width=160, return_data=False)`
 - `job_status(job_id)`
+- `job_ssh_target(job_id, rank=0)`
 - `job_logs(job_id, tail=100, verbose=False, region='SR006')`
 - `kill_job(job_id, region='SR006')`
 - `get_workspace_info(refresh=True)`

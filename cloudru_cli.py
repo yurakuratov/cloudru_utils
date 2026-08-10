@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import shlex
+import subprocess
 import traceback
 from typing import Optional
 
@@ -554,6 +555,42 @@ def cmd_jobs_logs(
         client.job_logs(job_id, tail=tail, verbose=verbose, region=target_region)
     except Exception as exc:
         _fail(exc, debug_mode)
+
+
+@jobs_app.command("ssh", help="Connect to a running job over SSH")
+def cmd_jobs_ssh(
+    ctx: typer.Context,
+    job_id: str,
+    rank: int = typer.Option(0, "--rank", min=0, help="Job rank: 0 is master, N is worker N-1"),
+    identity: Optional[str] = typer.Option(None, "--identity", "-i", help="Path to a private SSH key"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the SSH command without running it"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        target = client.job_ssh_target(job_id, rank=rank)
+
+        command = ["ssh", target["destination"], "-p", target["port"]]
+        if identity:
+            command.extend(["-i", os.path.expanduser(identity)])
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+    if dry_run:
+        typer.echo(shlex.join(command))
+        return
+
+    try:
+        result = subprocess.run(command, check=False)
+    except FileNotFoundError:
+        _fail(RuntimeError("OpenSSH client 'ssh' was not found in PATH"), debug_mode)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
 
 @jobs_app.command("kill", help="Delete one or more jobs")
