@@ -82,6 +82,8 @@ cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key --dry-run
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- nvidia-smi
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- python train.py --epochs 3
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs kill lm-mpi-job-xxxx lm-mpi-job-yyyy --yes
 cloudru bot run
@@ -173,6 +175,32 @@ cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/priva
 ```
 
 The job must be in `Running` status. The CLI obtains the workspace namespace and region-specific SSH gateway from Cloud.ru, then starts the local OpenSSH client interactively.
+
+### Execute a command on a running job
+
+`cloudru jobs exec` uses the same SSH target resolution as `cloudru jobs ssh`, but runs one command and returns its exit status. Put `--` before the remote command so arguments beginning with `-` are not interpreted as Cloud.ru CLI options.
+
+```bash
+# Run a command on the master pod
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- nvidia-smi
+
+# Pass arguments to a command
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- python train.py --epochs 3
+
+# Run on the first worker with an explicit private key
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key -- nvidia-smi
+
+# Allocate a pseudo-terminal for a command that needs one
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tty -- top
+
+# Preview the exact SSH command
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --dry-run -- nvidia-smi
+
+# Shell syntax is explicit
+cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- bash -lc 'nvidia-smi | grep A100'
+```
+
+Command tokens are safely quoted before being passed to the remote shell, so arguments containing spaces are preserved. Use `bash -lc`, as shown above, when you need pipes, redirects, variable expansion, `cd`, or multiple commands.
 
 ## Telegram Bot (local run)
 
