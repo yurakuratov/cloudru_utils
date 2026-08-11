@@ -130,11 +130,12 @@ def _build_ssh_command(
     tty: bool = False,
     remote_command: Optional[list[str]] = None,
 ) -> list[str]:
-    command = ["ssh", target["destination"], "-p", target["port"]]
+    command = ["ssh", "-p", target["port"]]
     if identity:
         command.extend(["-i", os.path.expanduser(identity)])
     if tty:
         command.append("-t")
+    command.append(target["destination"])
     if remote_command is not None:
         if not remote_command:
             raise RuntimeError("A remote command is required")
