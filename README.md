@@ -85,6 +85,7 @@ cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key --dry-run
+cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --alias cloudru-training
 cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- nvidia-smi
 cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- python train.py --epochs 3
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -202,6 +203,25 @@ cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/priva
 ```
 
 The job must be in `Running` status. The CLI obtains the workspace namespace and region-specific SSH gateway from Cloud.ru, then starts the local OpenSSH client interactively.
+
+A matching private-key identity is always required. You may supply its file with `-i`, load it into `ssh-agent`, or make it available through OpenSSH's default identity paths.
+
+### Generate an SSH config entry
+
+`cloudru jobs ssh-config` prints an OpenSSH config block that can be pasted into `~/.ssh/config` and used by VS Code Remote SSH. It does not modify any files.
+
+```bash
+# Generate a friendly entry for the master pod using ssh-agent/default identities
+cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --alias cloudru-training
+
+# Include an explicit private key
+cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --alias cloudru-training -i ~/.ssh/private_id_rsa_key
+
+# Generate an entry for the first worker
+cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 --alias cloudru-worker
+```
+
+When `--alias` is omitted, the generated alias is `cloudru-<last-8-job-id-characters>-r<rank>`. When `-i` is omitted, the output contains commented guidance showing how to configure the required identity. Paste the block into `~/.ssh/config`, then run `ssh cloudru-training` or select `cloudru-training` in VS Code Remote SSH.
 
 ### Execute a command on a running job
 
