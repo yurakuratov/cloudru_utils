@@ -149,6 +149,38 @@ def _build_ssh_command(
     return command
 
 
+def _build_ssh_config(
+    target: dict,
+    rank: int,
+    host_alias: Optional[str] = None,
+    identity: Optional[str] = None,
+) -> str:
+    alias = host_alias if host_alias is not None else f"cloudru-{target['job_id'][-8:]}-r{rank}"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", alias):
+        raise RuntimeError("SSH config alias may contain only letters, numbers, '.', '_', and '-'")
+
+    user = f"{target['job_id']}-{target['pod']}.{target['namespace']}"
+    lines = [
+        f"Host {alias}",
+        f"  HostName {target['host']}",
+        f"  User {user}",
+        f"  Port {target['port']}",
+    ]
+    if identity:
+        identity_path = os.path.expanduser(identity)
+        if "\n" in identity_path or "\r" in identity_path:
+            raise RuntimeError("SSH identity path must not contain newlines")
+        quoted_path = identity_path.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'  IdentityFile "{quoted_path}"')
+    else:
+        lines.extend([
+            "  # SSH authentication still requires the matching private key.",
+            "  # Load it into ssh-agent, use an OpenSSH default identity, or uncomment:",
+            "  # IdentityFile ~/.ssh/private_id_rsa_key",
+        ])
+    return "\n".join(lines)
+
+
 def _run_ssh_command(command: list[str], dry_run: bool, debug: bool) -> None:
     if dry_run:
         typer.echo(shlex.join(command))
@@ -932,6 +964,36 @@ def cmd_jobs_ssh(
         _fail(exc, debug_mode)
 
     _run_ssh_command(command, dry_run=dry_run, debug=debug_mode)
+
+
+@jobs_app.command("ssh-config", help="Print an OpenSSH config block for a running job")
+def cmd_jobs_ssh_config(
+    ctx: typer.Context,
+    job_id: str,
+    rank: int = typer.Option(0, "--rank", min=0, help="Job rank: 0 is master, N is worker N-1"),
+    identity: Optional[str] = typer.Option(
+        None,
+        "--identity",
+        "-i",
+        help="Private key path; omit only when available through ssh-agent or OpenSSH defaults",
+    ),
+    host_alias: Optional[str] = typer.Option(None, "--alias", help="Host alias for SSH and VS Code"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        target = client.job_ssh_target(job_id, rank=rank)
+        config = _build_ssh_config(
+            target,
+            rank=rank,
+            host_alias=host_alias,
+            identity=identity,
+        )
+        typer.echo(config)
+    except Exception as exc:
+        _fail(exc, debug_mode)
 
 
 @jobs_app.command("exec", help="Execute a command on a running job over SSH")
