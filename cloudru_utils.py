@@ -260,8 +260,8 @@ class CloudRuAPIClient:
 
         return response
 
-    def _get_jobs(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
-        """Get all jobs in workspace for specified region
+    def _get_jobs_page(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
+        """Get one page of jobs in a workspace for the specified region.
 
         Args:
             region (str): Region code (default: SR006)
@@ -269,7 +269,7 @@ class CloudRuAPIClient:
             limit (int): Maximum number of jobs to return (default: 1000)
 
         Returns:
-            Response from jobs API endpoint
+            dict: Validated jobs API response containing ``jobs`` and ``count``.
         """
         self._refresh_token()
         url = f'{self.API_URL}/jobs'
@@ -304,14 +304,70 @@ class CloudRuAPIClient:
                 f"Jobs request failed for region={region} (HTTP {response.status_code}): {jobs_data}"
             )
 
-        if not isinstance(jobs_data, dict) or 'jobs' not in jobs_data:
+        if not isinstance(jobs_data, dict) or not isinstance(jobs_data.get('jobs'), list):
             raise RuntimeError(
                 f"Unexpected jobs response format for region={region}. "
                 f"Expected object with 'jobs'. Got: {jobs_data}"
             )
 
-        sorted_jobs = sorted(jobs_data['jobs'], key=lambda x: x['created_dt'], reverse=True)
-        return sorted_jobs
+        jobs = jobs_data['jobs']
+        raw_count = jobs_data.get('count')
+        try:
+            count = int(raw_count) if raw_count is not None else None
+        except (TypeError, ValueError):
+            count = None
+        return {'jobs': jobs, 'count': count}
+
+    def _get_jobs(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
+        """Get one page of jobs as a list, preserving the historical helper API."""
+        jobs_data = self._get_jobs_page(
+            region=region,
+            offset=offset,
+            limit=limit,
+            status_in=status_in,
+            status_not_in=status_not_in,
+        )
+        return sorted(jobs_data['jobs'], key=lambda x: x.get('created_dt', ''), reverse=True)
+
+    def _get_all_jobs(self, region='SR006', status_in=[], status_not_in=[], page_size=1000):
+        """Get every job for a region using the jobs endpoint pagination metadata."""
+        if page_size < 1:
+            raise RuntimeError("Jobs page size must be positive")
+
+        jobs = []
+        offset = 0
+        total_count = None
+        seen_pages = set()
+
+        while True:
+            page = self._get_jobs_page(
+                region=region,
+                offset=offset,
+                limit=page_size,
+                status_in=status_in,
+                status_not_in=status_not_in,
+            )
+            page_jobs = page['jobs']
+            if not page_jobs:
+                break
+
+            page_ids = tuple(job.get('job_name') for job in page_jobs)
+            if page_ids in seen_pages:
+                raise RuntimeError(f"Jobs pagination did not advance for region={region}")
+            seen_pages.add(page_ids)
+
+            jobs.extend(page_jobs)
+            offset += len(page_jobs)
+
+            page_count = page['count']
+            if page_count is not None:
+                total_count = max(total_count or 0, page_count)
+                if offset >= total_count:
+                    break
+            elif len(page_jobs) < page_size:
+                break
+
+        return jobs
 
     def _get_job_status(self, job_id):
         """Get status of a specific job
