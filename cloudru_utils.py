@@ -1338,6 +1338,84 @@ class CloudRuAPIClient:
             return normalized
         return None
 
+    def job_ssh_target(self, job_id, rank=0):
+        """Resolve SSH connection details for a running training job.
+
+        Args:
+            job_id (str): ID of the job to connect to.
+            rank (int, optional): Job rank. Rank 0 is the master pod; rank N
+                maps to worker pod N-1. Defaults to 0.
+
+        Returns:
+            dict: Normalized SSH target details, including destination and port.
+
+        Raises:
+            RuntimeError: If the rank is invalid or required API data is missing.
+        """
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise RuntimeError("SSH rank must be a non-negative integer")
+
+        status = self._get_job_status(job_id)
+        if not isinstance(status, dict):
+            raise RuntimeError(f"Unexpected status response for job '{job_id}'")
+
+        resolved_job_id = status.get('job_name')
+        if not resolved_job_id:
+            raise RuntimeError(f"Job '{job_id}' was not found or returned an invalid status response")
+
+        job_status = str(status.get('status', '')).strip()
+        if job_status.lower() != 'running':
+            display_status = job_status.capitalize() if job_status else 'Unknown'
+            raise RuntimeError(
+                f"Job '{resolved_job_id}' must be Running for SSH access; current status: {display_status}"
+            )
+
+        region = status.get('region')
+        if not region:
+            raise RuntimeError(f"Job '{resolved_job_id}' status response does not contain a region")
+
+        workspace = self.get_workspace_info(refresh=False)
+        if not isinstance(workspace, dict):
+            raise RuntimeError("Unexpected workspace response while resolving SSH target")
+
+        namespace = workspace.get('namespace')
+        if not namespace:
+            raise RuntimeError("Workspace response does not contain an SSH namespace")
+
+        configs = self._get_configs()
+        if not isinstance(configs, dict) or not isinstance(configs.get('regions'), list):
+            raise RuntimeError("Unexpected configs response while resolving SSH target")
+
+        region_config = next(
+            (item for item in configs['regions'] if isinstance(item, dict) and item.get('key') == region),
+            None,
+        )
+        if region_config is None:
+            raise RuntimeError(f"Region '{region}' was not found in the Cloud.ru configs response")
+
+        ssh_config = region_config.get('ssh')
+        if not isinstance(ssh_config, dict):
+            raise RuntimeError(f"SSH access is not configured for region '{region}'")
+
+        host = ssh_config.get('url')
+        port = ssh_config.get('port')
+        if not host or not port:
+            raise RuntimeError(f"SSH host or port is missing for region '{region}'")
+
+        pod = 'mpimaster-0' if rank == 0 else f'mpiworker-{rank - 1}'
+        destination = f'{resolved_job_id}-{pod}.{namespace}@{host}'
+
+        return {
+            'job_id': resolved_job_id,
+            'status': job_status,
+            'region': region,
+            'namespace': namespace,
+            'pod': pod,
+            'host': host,
+            'port': str(port),
+            'destination': destination,
+        }
+
     @staticmethod
     def _format_unix_timestamp(ts_raw):
         try:

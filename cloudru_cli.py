@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import shlex
+import subprocess
 import traceback
 from typing import Optional
 
@@ -121,6 +122,41 @@ def _build_client(profile: str) -> tuple[CloudRuAPIClient, dict]:
         token_persist_callback=lambda token, expires_at: save_cached_token(profile, token, expires_at),
     )
     return client, cfg
+
+
+def _build_ssh_command(
+    target: dict,
+    identity: Optional[str] = None,
+    tty: bool = False,
+    remote_command: Optional[list[str]] = None,
+) -> list[str]:
+    command = ["ssh", "-p", target["port"]]
+    if identity:
+        command.extend(["-i", os.path.expanduser(identity)])
+    if tty:
+        command.append("-t")
+    command.append(target["destination"])
+    if remote_command is not None:
+        if not remote_command:
+            raise RuntimeError("A remote command is required")
+        command.append(f"exec {shlex.join(remote_command)}")
+    return command
+
+
+def _run_ssh_command(command: list[str], dry_run: bool, debug: bool) -> None:
+    if dry_run:
+        typer.echo(shlex.join(command))
+        return
+
+    try:
+        result = subprocess.run(command, check=False)
+    except FileNotFoundError:
+        _fail(RuntimeError("OpenSSH client 'ssh' was not found in PATH"), debug)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
 
 def _normalize_status_list(values: list[str], arg_name: str) -> list[str]:
@@ -554,6 +590,59 @@ def cmd_jobs_logs(
         client.job_logs(job_id, tail=tail, verbose=verbose, region=target_region)
     except Exception as exc:
         _fail(exc, debug_mode)
+
+
+@jobs_app.command("ssh", help="Connect to a running job over SSH")
+def cmd_jobs_ssh(
+    ctx: typer.Context,
+    job_id: str,
+    rank: int = typer.Option(0, "--rank", min=0, help="Job rank: 0 is master, N is worker N-1"),
+    identity: Optional[str] = typer.Option(None, "--identity", "-i", help="Path to a private SSH key"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the SSH command without running it"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        target = client.job_ssh_target(job_id, rank=rank)
+        command = _build_ssh_command(target, identity=identity)
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+    _run_ssh_command(command, dry_run=dry_run, debug=debug_mode)
+
+
+@jobs_app.command("exec", help="Execute a command on a running job over SSH")
+def cmd_jobs_exec(
+    ctx: typer.Context,
+    job_id: str,
+    command_args: list[str] = typer.Argument(
+        ...,
+        metavar="COMMAND [ARGS]...",
+        help="Remote command and arguments",
+    ),
+    rank: int = typer.Option(0, "--rank", min=0, help="Job rank: 0 is master, N is worker N-1"),
+    identity: Optional[str] = typer.Option(None, "--identity", "-i", help="Path to a private SSH key"),
+    tty: bool = typer.Option(False, "--tty", "-t", help="Allocate an SSH pseudo-terminal"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the SSH command without running it"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        target = client.job_ssh_target(job_id, rank=rank)
+        command = _build_ssh_command(
+            target,
+            identity=identity,
+            tty=tty,
+            remote_command=command_args,
+        )
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+    _run_ssh_command(command, dry_run=dry_run, debug=debug_mode)
 
 
 @jobs_app.command("kill", help="Delete one or more jobs")
