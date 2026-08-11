@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 import getpass
 import json
 import os
+import re
 import shlex
 import subprocess
 import traceback
@@ -32,6 +36,8 @@ from cloudru_utils import CloudRuAPIClient
 
 DEFAULT_SOURCE = "auto"
 VALID_SOURCES = ["auto", "instance_types_available", "allocations_instance_types_availability"]
+COST_GROUP_FIELDS = ["profile", "region", "n_gpus"]
+COST_DEFAULT_GROUP_BY = ["profile", "region"]
 
 SUBMIT_JOB_ALLOWED_FIELDS = {
     "script",
@@ -169,6 +175,209 @@ def _normalize_status_list(values: list[str], arg_name: str) -> list[str]:
                 raise RuntimeError(f"Unknown {arg_name} '{status}'. Valid values: {valid}")
             normalized.append(status_map[key])
     return normalized
+
+
+def _parse_csv_options(values: list[str]) -> list[str]:
+    parsed = []
+    for value in values:
+        for item in value.split(","):
+            item = item.strip()
+            if item and item not in parsed:
+                parsed.append(item)
+    return parsed
+
+
+def _parse_cost_since(value: str, now: Optional[datetime] = None) -> datetime:
+    match = re.fullmatch(r"([1-9]\d*)([mhdw])", str(value).strip(), flags=re.IGNORECASE)
+    if not match:
+        raise RuntimeError("Invalid --since value. Use a positive duration such as 30m, 12h, 30d, or 4w")
+
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    delta = {
+        "m": timedelta(minutes=amount),
+        "h": timedelta(hours=amount),
+        "d": timedelta(days=amount),
+        "w": timedelta(weeks=amount),
+    }[unit]
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc) - delta
+
+
+def _format_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_cost_datetime(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_duration_seconds(value) -> Decimal:
+    raw = str(value or "").strip().lower()
+    if raw.endswith("s"):
+        raw = raw[:-1]
+    try:
+        seconds = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+    if not seconds.is_finite():
+        return Decimal("0")
+    return max(seconds, Decimal("0"))
+
+
+def _parse_reported_cost(value) -> Decimal:
+    try:
+        cost = Decimal(str(value or "0"))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+    return cost if cost.is_finite() else Decimal("0")
+
+
+def _normalize_cost_group_by(values: list[str]) -> list[str]:
+    if not values:
+        return COST_DEFAULT_GROUP_BY[:]
+
+    parsed = []
+    for value in values:
+        for field in [part.strip() for part in value.split(",") if part.strip()]:
+            if field not in COST_GROUP_FIELDS:
+                raise RuntimeError(
+                    f"Unknown --group-by field '{field}'. Valid values: {', '.join(COST_GROUP_FIELDS)}"
+                )
+            if field in parsed:
+                raise RuntimeError(f"Duplicate --group-by field '{field}'")
+            parsed.append(field)
+    return parsed or COST_DEFAULT_GROUP_BY[:]
+
+
+def _normalize_cost_job(
+    job: dict,
+    profile: str,
+    cutoff: datetime,
+    n_gpus: Optional[int],
+) -> Optional[dict]:
+    created_at = _parse_cost_datetime(job.get("created_dt"))
+    if created_at is None or created_at < cutoff:
+        return None
+
+    try:
+        gpu_count = int(job.get("gpu_count", 0))
+    except (TypeError, ValueError):
+        gpu_count = 0
+    if n_gpus is not None and gpu_count != n_gpus:
+        return None
+
+    duration_seconds = _parse_duration_seconds(job.get("duration"))
+    return {
+        "profile": profile,
+        "region": str(job.get("region") or ""),
+        "n_gpus": gpu_count,
+        "gpu_hours": duration_seconds * Decimal(gpu_count) / Decimal(3600),
+        "reported_cost": _parse_reported_cost(job.get("cost")),
+    }
+
+
+def _format_decimal(value: Decimal, places: int = 2) -> str:
+    return f"{value:.{places}f}"
+
+
+def _aggregate_cost_jobs(jobs: list[dict], group_by: list[str]) -> tuple[list[dict], dict]:
+    region_costs = defaultdict(lambda: Decimal("0"))
+    for job in jobs:
+        region_costs[(job["profile"], job["region"])] += job["reported_cost"]
+
+    paid_regions = {key for key, cost in region_costs.items() if cost != 0}
+    paid_jobs = [job for job in jobs if (job["profile"], job["region"]) in paid_regions]
+
+    groups = {}
+    for job in paid_jobs:
+        key = tuple(job[field] for field in group_by)
+        group = groups.setdefault(
+            key,
+            {"jobs": 0, "gpu_hours": Decimal("0"), "reported_cost": Decimal("0")},
+        )
+        group["jobs"] += 1
+        group["gpu_hours"] += job["gpu_hours"]
+        group["reported_cost"] += job["reported_cost"]
+
+    total_cost = sum((job["reported_cost"] for job in paid_jobs), Decimal("0"))
+    total_gpu_hours = sum((job["gpu_hours"] for job in paid_jobs), Decimal("0"))
+
+    rows = []
+    for key, group in groups.items():
+        row = {field: value for field, value in zip(group_by, key)}
+        row.update({
+            "jobs": group["jobs"],
+            "gpu_hours": float(_format_decimal(group["gpu_hours"])),
+            "reported_cost": _format_decimal(group["reported_cost"]),
+            "cost_share_pct": (
+                round(float(group["reported_cost"] / total_cost * Decimal(100)), 2)
+                if total_cost != 0
+                else 0.0
+            ),
+        })
+        rows.append(row)
+
+    rows.sort(
+        key=lambda row: (
+            -Decimal(row["reported_cost"]),
+            tuple(str(row.get(field, "")) for field in group_by),
+        )
+    )
+    totals = {
+        "jobs": len(paid_jobs),
+        "gpu_hours": float(_format_decimal(total_gpu_hours)),
+        "reported_cost": _format_decimal(total_cost),
+    }
+    return rows, totals
+
+
+def _render_cost_report(report: dict, table_width: int) -> None:
+    labels = {"profile": "Profile", "region": "Region", "n_gpus": "GPUs"}
+    table = Table(title=f"Job Costs (since {report['cutoff']})")
+    for field in report["group_by"]:
+        table.add_column(labels[field], style="cyan" if field == "profile" else "yellow")
+    table.add_column("Jobs", justify="right")
+    table.add_column("GPU-hours", justify="right")
+    table.add_column("Reported cost", justify="right", style="green")
+    table.add_column("Share", justify="right")
+
+    for row in report["rows"]:
+        table.add_row(
+            *[str(row[field]) for field in report["group_by"]],
+            str(row["jobs"]),
+            f"{row['gpu_hours']:.2f}",
+            row["reported_cost"],
+            f"{row['cost_share_pct']:.2f}%",
+        )
+
+    totals = report["totals"]
+    summary = Text()
+    summary.append("Jobs: ", style="bold")
+    summary.append(str(totals["jobs"]))
+    summary.append(" | GPU-hours: ", style="bold")
+    summary.append(f"{totals['gpu_hours']:.2f}")
+    summary.append(" | Reported cost: ", style="bold green")
+    summary.append(totals["reported_cost"], style="green")
+    summary.append("\nAs of: ", style="bold")
+    summary.append(report["as_of"])
+
+    console = Console(width=table_width)
+    console.print(table)
+    console.print(Panel(summary, title="Job Cost Total"))
+    if report["warnings"]:
+        warning_text = Text("\n".join(f"- {warning}" for warning in report["warnings"]))
+        console.print(Panel(warning_text, title="Warnings"))
 
 
 def _load_job_yaml(path: str) -> tuple[dict, dict]:
@@ -504,6 +713,118 @@ def cmd_used_resources(
             for profile_name, error in failed_profiles:
                 failed_text.append(f"- {profile_name}: {error}\n")
             console.print(Panel(failed_text, title="Profiles with errors"))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@resources_app.command("cost", help="Report Cloud.ru job costs")
+def cmd_resources_cost(
+    ctx: typer.Context,
+    since: str = typer.Option("30d", "--since", help="Creation-time window, e.g. 30m, 12h, 30d, 4w"),
+    all_profiles: bool = typer.Option(False, "--all", help="Collect from all configured profiles"),
+    group_by: Optional[list[str]] = typer.Option(
+        None,
+        "--group-by",
+        help="Repeatable or comma-separated: profile, region, n_gpus",
+    ),
+    region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; defaults to profile region"),
+    n_gpus: Optional[int] = typer.Option(None, "--n-gpus", min=0, help="Exact allocated GPU count"),
+    as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
+    table_width: int = typer.Option(140, "--table-width", min=60),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        report_now = datetime.now(timezone.utc)
+        cutoff = _parse_cost_since(since, now=report_now)
+        normalized_regions = _parse_csv_options(region or [])
+        normalized_group_by = _normalize_cost_group_by(group_by or [])
+
+        if all_profiles:
+            profile_names = list_auth_profiles()
+            if not profile_names:
+                raise RuntimeError("No profiles found. Run `cloudru init --profile <name>` first.")
+        else:
+            profile_names = [_resolve_profile(ctx, profile)]
+
+        all_jobs = []
+        warnings = []
+        successful_profiles = []
+        workspace_region_profiles = {}
+        queried_regions = {}
+
+        for profile_name in profile_names:
+            try:
+                client, cfg = _build_client(profile_name)
+                workspace_id = str(client.x_workspace_id or "")
+                target_regions = normalized_regions or [cfg.get("region") or "SR006"]
+                profile_jobs = []
+                profile_regions = []
+                for target_region in target_regions:
+                    workspace_region = (workspace_id, target_region)
+                    if workspace_id and workspace_region in workspace_region_profiles:
+                        warnings.append(
+                            f"profile '{profile_name}' region '{target_region}' skipped: "
+                            "workspace/region already counted by profile "
+                            f"'{workspace_region_profiles[workspace_region]}'"
+                        )
+                        continue
+
+                    raw_jobs = client._get_all_jobs(region=target_region)
+                    for raw_job in raw_jobs:
+                        normalized_job = _normalize_cost_job(
+                            raw_job,
+                            profile=profile_name,
+                            cutoff=cutoff,
+                            n_gpus=n_gpus,
+                        )
+                        if normalized_job is not None:
+                            profile_jobs.append(normalized_job)
+                    profile_regions.append(target_region)
+
+                if not profile_regions:
+                    continue
+
+                for target_region in profile_regions:
+                    if workspace_id:
+                        workspace_region_profiles[(workspace_id, target_region)] = profile_name
+                successful_profiles.append(profile_name)
+                queried_regions[profile_name] = profile_regions
+                all_jobs.extend(profile_jobs)
+            except Exception as exc:
+                if not all_profiles:
+                    raise
+                if debug_mode:
+                    traceback.print_exc()
+                warnings.append(f"profile '{profile_name}' failed: {exc}")
+
+        if not successful_profiles:
+            details = "\n".join(f"- {warning}" for warning in warnings)
+            raise RuntimeError(f"Failed to collect cost data for all profiles:\n{details}")
+
+        rows, totals = _aggregate_cost_jobs(all_jobs, normalized_group_by)
+        report = {
+            "as_of": _format_utc(report_now),
+            "since": since,
+            "cutoff": _format_utc(cutoff),
+            "group_by": normalized_group_by,
+            "filters": {
+                "profiles": profile_names,
+                "regions": normalized_regions or "profile_default",
+                "n_gpus": n_gpus,
+            },
+            "regions_queried": queried_regions,
+            "profiles_succeeded": successful_profiles,
+            "totals": totals,
+            "rows": rows,
+            "warnings": warnings,
+        }
+
+        if as_json:
+            typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            _render_cost_report(report, table_width=table_width)
     except Exception as exc:
         _fail(exc, debug_mode)
 

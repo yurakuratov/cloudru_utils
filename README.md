@@ -68,6 +68,9 @@ cloudru resources used
 cloudru resources used --region SR006 --n 2000
 cloudru resources used --all
 cloudru resources used --all --region SR006
+cloudru resources cost --since 30d
+cloudru resources cost --all --group-by profile,region,n_gpus
+cloudru resources cost --n-gpus 1 --json
 cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
 cloudru jobs finished --n 20
@@ -155,6 +158,30 @@ Config files:
 Profile selection:
 - `--profile`
 - `CLOUDRU_PROFILE`
+
+### Report job costs
+
+`cloudru resources cost` aggregates the job cost reported by the Cloud.ru jobs API. It queries the selected profile's default region and includes jobs created within the last 30 days.
+
+```bash
+# Default profile and its configured region, grouped by profile and region
+cloudru resources cost --since 30d
+
+# All configured profiles with an explicit grouping order
+cloudru resources cost --all --group-by profile,region,n_gpus
+
+# Filter by allocated GPU count
+cloudru resources cost --n-gpus 1
+
+# Query one or more explicit regions and emit machine-readable output
+cloudru resources cost --region SR003 --region SR006 --json
+```
+
+`--since` accepts positive minute, hour, day, and week durations such as `30m`, `12h`, `30d`, and `4w`. It filters by job creation time in UTC. Grouping supports `profile`, `region`, and `n_gpus`; when omitted, grouping defaults to `profile,region`. With `--all`, each profile uses its own configured region unless `--region` overrides it for every profile.
+
+Regions whose matching jobs have a total reported cost of zero are omitted completely, including their job and GPU-hour counts. Running jobs use their current accrued cost and duration from the API.
+
+The value is the cost reported for training jobs, without an assumed currency symbol. It is not a complete project invoice and may not represent continuous allocation billing.
 
 ### Connect to a running job over SSH
 
