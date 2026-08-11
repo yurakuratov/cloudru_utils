@@ -311,10 +311,11 @@ class CloudRuAPIClient:
             )
 
         jobs = jobs_data['jobs']
+        raw_count = jobs_data.get('count')
         try:
-            count = int(jobs_data.get('count', len(jobs)))
+            count = int(raw_count) if raw_count is not None else None
         except (TypeError, ValueError):
-            count = len(jobs)
+            count = None
         return {'jobs': jobs, 'count': count}
 
     def _get_jobs(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
@@ -336,8 +337,9 @@ class CloudRuAPIClient:
         jobs = []
         offset = 0
         total_count = None
+        seen_pages = set()
 
-        while total_count is None or offset < total_count:
+        while True:
             page = self._get_jobs_page(
                 region=region,
                 offset=offset,
@@ -346,13 +348,24 @@ class CloudRuAPIClient:
                 status_not_in=status_not_in,
             )
             page_jobs = page['jobs']
-            if total_count is None:
-                total_count = max(0, page['count'])
             if not page_jobs:
                 break
 
+            page_ids = tuple(job.get('job_name') for job in page_jobs)
+            if page_ids in seen_pages:
+                raise RuntimeError(f"Jobs pagination did not advance for region={region}")
+            seen_pages.add(page_ids)
+
             jobs.extend(page_jobs)
             offset += len(page_jobs)
+
+            page_count = page['count']
+            if page_count is not None:
+                total_count = max(total_count or 0, page_count)
+                if offset >= total_count:
+                    break
+            elif len(page_jobs) < page_size:
+                break
 
         return jobs
 
