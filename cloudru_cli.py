@@ -62,15 +62,19 @@ SUBMIT_JOB_ALLOWED_FIELDS = {
     "spark_executor_memory",
     "health_params",
     "stop_timer",
+    "allocation_name",
+    "queue_name",
 }
 
 app = typer.Typer(help="Cloud.ru jobs helper CLI", no_args_is_help=True, add_completion=True)
 workspace_app = typer.Typer(help="Workspace commands", no_args_is_help=True)
+allocations_app = typer.Typer(help="Allocation inspection commands", no_args_is_help=True)
 resources_app = typer.Typer(help="Resources commands", no_args_is_help=True)
 jobs_app = typer.Typer(help="Jobs commands", no_args_is_help=True)
 bot_app = typer.Typer(help="Telegram bot commands", no_args_is_help=True)
 
 app.add_typer(workspace_app, name="workspace")
+app.add_typer(allocations_app, name="allocations")
 app.add_typer(resources_app, name="resources")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(bot_app, name="bot")
@@ -595,6 +599,76 @@ def cmd_workspace_info(
         _fail(exc, debug_mode)
 
 
+@allocations_app.command("list", help="List allocations available to the workspace")
+def cmd_allocations_list(
+    ctx: typer.Context,
+    as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        data = client.allocations(
+            table_width=table_width,
+            return_data=as_json,
+            show_table=not as_json,
+        )
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@allocations_app.command("show", help="Show allocation details")
+def cmd_allocations_show(
+    ctx: typer.Context,
+    allocation: str = typer.Argument(..., help="Allocation UUID or exact name", metavar="ALLOCATION"),
+    as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        data = client.allocation_info(
+            allocation,
+            table_width=table_width,
+            return_data=as_json,
+            show_table=not as_json,
+        )
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@allocations_app.command("status", help="Show allocation resource status")
+def cmd_allocations_status(
+    ctx: typer.Context,
+    allocation: str = typer.Argument(..., help="Allocation UUID or exact name", metavar="ALLOCATION"),
+    as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        data = client.allocation_status(
+            allocation,
+            table_width=table_width,
+            return_data=as_json,
+            show_table=not as_json,
+        )
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
 @resources_app.command("instance-types", help="Show supported instance types for region")
 def cmd_instance_types(
     ctx: typer.Context,
@@ -868,6 +942,7 @@ def cmd_jobs_list(
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
     status: Optional[list[str]] = typer.Option(None, "--status", help="Repeatable or comma-separated"),
     status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Repeatable or comma-separated"),
+    allocation_name: Optional[str] = typer.Option(None, "--allocation-name", help="Filter by allocation name"),
     n: int = typer.Option(20, "--n", min=1),
     table_width: int = typer.Option(160, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -886,6 +961,7 @@ def cmd_jobs_list(
             regions=regions,
             n_last=n,
             table_width=table_width,
+            allocation_name=allocation_name,
         )
     except Exception as exc:
         _fail(exc, debug_mode)
@@ -1097,6 +1173,8 @@ def cmd_jobs_submit(
     region: Optional[str] = typer.Option(None, "--region"),
     job_type: Optional[str] = typer.Option(None, "--job-type"),
     job_desc: Optional[str] = typer.Option(None, "--job-desc"),
+    allocation_name: Optional[str] = typer.Option(None, "--allocation-name"),
+    queue_name: Optional[str] = typer.Option(None, "--queue-name"),
     n_workers: Optional[int] = typer.Option(None, "--n-workers", min=1),
     processes_per_worker: Optional[int] = typer.Option(None, "--processes-per-worker", min=1),
     conda_env: Optional[str] = typer.Option(None, "--conda-env"),
@@ -1128,6 +1206,8 @@ def cmd_jobs_submit(
             "region": region,
             "job_type": job_type,
             "job_desc": job_desc,
+            "allocation_name": allocation_name,
+            "queue_name": queue_name,
             "n_workers": n_workers,
             "processes_per_worker": processes_per_worker,
             "conda_env": conda_env,

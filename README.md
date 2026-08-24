@@ -43,6 +43,7 @@ cloudru --install-completion
 
 # Check workspace and jobs
 cloudru workspace info
+cloudru allocations list
 cloudru jobs list
 
 # See currently available resources
@@ -61,6 +62,11 @@ Main commands:
 
 ```bash
 cloudru workspace info
+cloudru allocations list
+cloudru allocations show 00000000-0000-4000-8000-000000000000
+cloudru allocations show alloc-priority-sr006
+cloudru allocations status alloc-priority-sr006
+cloudru allocations status 00000000-0000-4000-8000-000000000000 --json
 cloudru resources instance-types --region SR006
 cloudru resources available
 cloudru resources available --all
@@ -73,10 +79,12 @@ cloudru resources cost --all --group-by profile,region,n_gpus
 cloudru resources cost --n-gpus 1 --json
 cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
+cloudru jobs list --allocation-name alloc-priority-sr006
 cloudru jobs finished --n 20
 cloudru jobs finished --status Completed,Succeeded --n 20
 cloudru jobs submit -f job.yaml --dry-run
 cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
+cloudru jobs submit -f job.yaml --allocation-name alloc-priority-sr006 --queue-name custom_queue
 cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
 cloudru jobs submit -f job.yaml --json
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -113,6 +121,7 @@ job:
   base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
   instance_type: "a100plus.1gpu.80vG.12C.96G"
   region: "SR006"
+  # allocation_name: "alloc-priority-sr006"  # optional; default allocation when omitted
   job_type: "binary"
   job_desc: "quick run"
   n_workers: 1
@@ -299,6 +308,7 @@ cloud_client = CloudRuAPIClient(
 )
 
 cloud_client.jobs(n_last=10)
+cloud_client.jobs(n_last=10, allocation_name="alloc-priority-sr006")
 cloud_client.job_status("lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
 ```
 
@@ -319,6 +329,7 @@ resp = cloud_client.submit_job(
     base_image="cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40",
     instance_type="a100plus.1gpu.80vG.12C.96G",
     region="SR006",
+    # allocation_name="alloc-priority-sr006",
     job_type="binary",
     n_workers=1,
     processes_per_worker=1,
@@ -336,6 +347,12 @@ Tip: use `cloud_client.instance_types(...)` and `cloud_client.available_resource
 ```python
 # Workspace info and allocations
 cloud_client.workspace_info(refresh=False)
+
+# Allocation summaries, details, and live resource status
+allocation_id = "00000000-0000-4000-8000-000000000000"
+cloud_client.allocations()
+cloud_client.allocation_info(allocation_id)
+cloud_client.allocation_status("alloc-priority-sr006")
 
 # Supported instance types in region
 cloud_client.instance_types(region="SR006")
@@ -358,7 +375,7 @@ cloud_client.kill_job(job_id, region="SR006")
 - `show_current_jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=-1)`
 - `CloudRuAPIClient(client_id, client_secret, x_api_key=None, x_workspace_id=None, ...)`
 - `submit_job(...)`
-- `jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160)`
+- `jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160, allocation_name=None)`
 - `finished_jobs(regions=['SR006'], n_last=1000, status_in=None, table_width=160, return_data=False)`
 - `job_status(job_id)`
 - `job_ssh_target(job_id, rank=0)`
@@ -366,9 +383,14 @@ cloud_client.kill_job(job_id, region="SR006")
 - `kill_job(job_id, region='SR006')`
 - `get_workspace_info(refresh=True)`
 - `workspace_info(refresh=True)`
+- `allocations(table_width=160, return_data=False, show_table=True)`
+- `allocation_info(allocation_id, table_width=160, return_data=False, show_table=True)`
+- `allocation_status(allocation_id, table_width=160, return_data=False, show_table=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
 - `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
 - `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True)`
+
+`allocation_info()` and `allocation_status()` accept either an allocation UUID or an exact, case-sensitive allocation name.
 
 ## Notes
 
