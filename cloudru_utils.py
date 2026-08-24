@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import re
+import uuid
 
 from rich.table import Table
 from rich.console import Console
@@ -260,13 +261,15 @@ class CloudRuAPIClient:
 
         return response
 
-    def _get_jobs_page(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
+    def _get_jobs_page(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[],
+                       allocation_name=None):
         """Get one page of jobs in a workspace for the specified region.
 
         Args:
             region (str): Region code (default: SR006)
             offset (int): Pagination offset (default: 0)
             limit (int): Maximum number of jobs to return (default: 1000)
+            allocation_name (str, optional): Allocation name to filter jobs by.
 
         Returns:
             dict: Validated jobs API response containing ``jobs`` and ``count``.
@@ -290,6 +293,8 @@ class CloudRuAPIClient:
             'limit': limit,
             'status': status,
         }
+        if allocation_name is not None:
+            params['allocation_name'] = allocation_name
 
         response = self._request_with_auth('get', url, headers=headers, params=params)
         try:
@@ -318,7 +323,7 @@ class CloudRuAPIClient:
             count = None
         return {'jobs': jobs, 'count': count}
 
-    def _get_jobs(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[]):
+    def _get_jobs(self, region='SR006', offset=0, limit=1000, status_in=[], status_not_in=[], allocation_name=None):
         """Get one page of jobs as a list, preserving the historical helper API."""
         jobs_data = self._get_jobs_page(
             region=region,
@@ -326,6 +331,7 @@ class CloudRuAPIClient:
             limit=limit,
             status_in=status_in,
             status_not_in=status_not_in,
+            allocation_name=allocation_name,
         )
         return sorted(jobs_data['jobs'], key=lambda x: x.get('created_dt', ''), reverse=True)
 
@@ -411,6 +417,120 @@ class CloudRuAPIClient:
 
         response = self._request_with_auth('get', url, headers=headers)
         return response.json()
+
+    def _get_allocation_api(self, path, operation, expected_type):
+        """Call a read-only allocation endpoint and validate its top-level response."""
+        self._refresh_token()
+        url = f'{self.API_URL}{path}'
+        headers = {
+            'accept': 'application/json',
+            'x-workspace-id': self.x_workspace_id,
+            'x-api-key': self.x_api_key,
+            'authorization': self.access_token,
+        }
+
+        response = self._request_with_auth('get', url, headers=headers)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f'{operation} failed (HTTP {response.status_code}) with non-JSON response'
+            ) from exc
+
+        if response.status_code >= 400:
+            raise RuntimeError(f'{operation} failed (HTTP {response.status_code}): {data}')
+        if not isinstance(data, expected_type):
+            expected_name = 'array' if expected_type is list else 'object'
+            raise RuntimeError(
+                f'Unexpected response from {operation}. Expected {expected_name}, got: {data}'
+            )
+        return data
+
+    def _get_allocations(self):
+        """List allocations available to the current workspace."""
+        data = self._get_allocation_api('/allocations/', 'List allocations', list)
+        if not all(isinstance(item, dict) for item in data):
+            raise RuntimeError('Unexpected response from List allocations. Expected an array of objects.')
+        return data
+
+    def _resolve_allocation_selector(self, allocation_id):
+        """Resolve an allocation UUID or exact allocation name to its UUID and optional name."""
+        selector = str(allocation_id)
+        try:
+            resolved_id = str(uuid.UUID(selector))
+            return resolved_id, None
+        except (ValueError, AttributeError, TypeError):
+            pass
+
+        matches = [
+            allocation
+            for allocation in self._get_allocations()
+            if allocation.get('name') == selector
+        ]
+        if not matches:
+            raise RuntimeError(
+                f"Allocation {selector!r} was not found by exact name in the current workspace."
+            )
+        if len(matches) > 1:
+            matching_ids = ', '.join(str(allocation.get('id') or '') for allocation in matches)
+            raise RuntimeError(
+                f"Allocation name {selector!r} is ambiguous. Matching IDs: {matching_ids}"
+            )
+
+        resolved_id = matches[0].get('id')
+        if not resolved_id:
+            raise RuntimeError(f"Allocation {selector!r} does not contain an allocation ID.")
+        return str(resolved_id), selector
+
+    def _get_allocation(self, allocation_id):
+        """Get detailed information for an allocation."""
+        data = self._get_allocation_api(
+            f'/allocations/{allocation_id}',
+            f'Get allocation {allocation_id}',
+            dict,
+        )
+        if not data.get('id') or not data.get('name') or not isinstance(data.get('resources'), dict):
+            raise RuntimeError(
+                f'Unexpected response from Get allocation {allocation_id}. '
+                "Expected fields 'id', 'name', and object 'resources'."
+            )
+        self._validate_allocation_resources_status(data['resources'], f'Get allocation {allocation_id}')
+        return data
+
+    def _get_allocation_resources_status(self, allocation_id):
+        """Get current resource metrics for an allocation."""
+        data = self._get_allocation_api(
+            f'/allocations/{allocation_id}/resources_status',
+            f'Get allocation resources status {allocation_id}',
+            dict,
+        )
+        self._validate_allocation_resources_status(
+            data,
+            f'Get allocation resources status {allocation_id}',
+        )
+        return data
+
+    @staticmethod
+    def _validate_allocation_resources_status(data, operation):
+        required_metrics = ('cpu', 'gpu', 'ram', 'nodes_status')
+        missing = [name for name in required_metrics if not isinstance(data.get(name), dict)]
+        if missing:
+            raise RuntimeError(
+                f"Unexpected response from {operation}. Missing resource metrics: {', '.join(missing)}"
+            )
+
+        missing_fields = []
+        for metric_name in ('cpu', 'gpu', 'ram'):
+            for field in ('current', 'available', 'all', 'timestamp'):
+                if field not in data[metric_name]:
+                    missing_fields.append(f'{metric_name}.{field}')
+        for field in ('available', 'all', 'timestamp'):
+            if field not in data['nodes_status']:
+                missing_fields.append(f'nodes_status.{field}')
+        if missing_fields:
+            raise RuntimeError(
+                f"Unexpected response from {operation}. Missing resource fields: {', '.join(missing_fields)}"
+            )
 
     def _get_allocation_instance_types_availability(self, allocation_id):
         """Get current resource availability for allocation instance types.
@@ -591,7 +711,8 @@ class CloudRuAPIClient:
                    processes_per_worker='default', job_desc=None, internet=True, conda_env=None, max_retry=None,
                    priority_class='medium', checkpoint_dir=None, flags=None, env_variables=None, pytorch_use_env=False,
                    elastic_min_workers='default', elastic_max_workers='default', elastic_max_restarts=5,
-                   spark_executor_memory=None, health_params=None, stop_timer=0):
+                   spark_executor_memory=None, health_params=None, stop_timer=0, allocation_name=None,
+                   queue_name=None):
         """Submit a new training job to the AI Cloud platform.
 
         # Caution: not all parameters were tested, only those that are related to running gpu jobs
@@ -664,6 +785,10 @@ class CloudRuAPIClient:
             health_params (dict, optional): Set of parameters for monitoring hung tasks. Defaults to None.
             stop_timer (int, optional): Time in minutes until forced deletion of a task that has transitioned to the
                                        "Running" status. Defaults to 0 (task will not be forcibly deleted).
+            allocation_name (str, optional): Name of the allocation in which the job will run. When omitted, Cloud.ru
+                                            uses the default allocation. Defaults to None.
+            queue_name (str, optional): Name of the queue in which the job will run. When omitted, Cloud.ru uses the
+                                       default queue. Defaults to None.
 
         Returns:
             dict: Response from job submission API endpoint
@@ -714,6 +839,10 @@ class CloudRuAPIClient:
             payload["spark_executor_memory"] = spark_executor_memory
         if health_params:
             payload["health_params"] = health_params
+        if allocation_name is not None:
+            payload["allocation_name"] = allocation_name
+        if queue_name is not None:
+            payload["queue_name"] = queue_name
 
         response = self._request_with_auth('post', url, headers=headers, json=payload)
         return response.json()
@@ -854,6 +983,154 @@ class CloudRuAPIClient:
             )
 
         console.print(allocations_table)
+
+    @staticmethod
+    def _format_allocation_metric(value):
+        if value is None:
+            return ''
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    def _render_allocation_resources_status(self, resources, title, console):
+        table = Table(title=title)
+        table.add_column('Resource', style='cyan')
+        table.add_column('Used', justify='right')
+        table.add_column('Available', justify='right', style='green')
+        table.add_column('Total', justify='right')
+
+        for key, label in (('cpu', 'CPU'), ('gpu', 'GPU'), ('ram', 'RAM')):
+            metric = resources[key]
+            table.add_row(
+                label,
+                self._format_allocation_metric(metric.get('current')),
+                self._format_allocation_metric(metric.get('available')),
+                self._format_allocation_metric(metric.get('all')),
+            )
+
+        nodes = resources['nodes_status']
+        nodes_total = nodes.get('all')
+        nodes_available = nodes.get('available')
+        nodes_used = None
+        if isinstance(nodes_total, (int, float)) and isinstance(nodes_available, (int, float)):
+            nodes_used = nodes_total - nodes_available
+        table.add_row(
+            'Nodes',
+            self._format_allocation_metric(nodes_used),
+            self._format_allocation_metric(nodes_available),
+            self._format_allocation_metric(nodes_total),
+        )
+        console.print(table)
+
+    def allocations(self, table_width=160, return_data=False, show_table=True):
+        """List allocations available to the current workspace."""
+        data = self._get_allocations()
+
+        if show_table:
+            console = Console(width=table_width)
+            if not data:
+                console.print(Panel('No allocations found for current workspace.', title='Allocations'))
+            else:
+                table = Table(title='Allocations')
+                table.add_column('Allocation ID', style='cyan')
+                table.add_column('Name', style='magenta')
+                table.add_column('Region', style='yellow')
+                table.add_column('Project')
+                table.add_column('Description', overflow='fold')
+
+                for allocation in data:
+                    project = allocation.get('project_name') or allocation.get('project_id') or ''
+                    table.add_row(
+                        str(allocation.get('id') or ''),
+                        str(allocation.get('name') or ''),
+                        str(allocation.get('region_key') or ''),
+                        str(project),
+                        str(allocation.get('description') or ''),
+                    )
+                console.print(table)
+
+        if return_data:
+            return data
+        return None
+
+    def allocation_info(self, allocation_id, table_width=160, return_data=False, show_table=True):
+        """Show details for an allocation selected by UUID or exact name."""
+        resolved_id, _ = self._resolve_allocation_selector(allocation_id)
+        data = self._get_allocation(resolved_id)
+
+        if show_table:
+            console = Console(width=table_width)
+            target_resource = data.get('target_resource') or {}
+            overview = Text()
+            overview_fields = (
+                ('Allocation ID', data.get('id')),
+                ('Name', data.get('name')),
+                ('Status', data.get('status')),
+                ('Region', data.get('region_key')),
+                ('Description', data.get('description')),
+                ('Project ID', data.get('project_id')),
+                ('Project name', data.get('project_name')),
+                ('Target nodes', target_resource.get('nodes')),
+                ('Target GPUs', target_resource.get('gpus')),
+            )
+            for label, value in overview_fields:
+                overview.append(f'{label}: ', style='bold')
+                overview.append(f'{value if value is not None else ""}\n')
+            console.print(Panel(
+                overview,
+                title=f"Allocation: {data.get('name')} ({data.get('id')})",
+            ))
+
+            self._render_allocation_resources_status(
+                data['resources'],
+                title='Allocation Resources',
+                console=console,
+            )
+
+            nodes = data.get('nodes') or []
+            if nodes:
+                nodes_table = Table(title='Allocation Nodes')
+                nodes_table.add_column('Node ID', style='cyan')
+                for node in nodes:
+                    nodes_table.add_row(str(node))
+                console.print(nodes_table)
+
+            workspace_access = data.get('workspace_access') or []
+            if workspace_access:
+                access_table = Table(title='Workspace Access')
+                access_table.add_column('Workspace ID', style='cyan')
+                access_table.add_column('Name', style='magenta')
+                for workspace in workspace_access:
+                    if isinstance(workspace, dict):
+                        access_table.add_row(
+                            str(workspace.get('id') or ''),
+                            str(workspace.get('name') or ''),
+                        )
+                console.print(access_table)
+
+        if return_data:
+            return data
+        return None
+
+    def allocation_status(self, allocation_id, table_width=160, return_data=False, show_table=True):
+        """Show resource metrics for an allocation selected by UUID or exact name."""
+        resolved_id, resolved_name = self._resolve_allocation_selector(allocation_id)
+        data = self._get_allocation_resources_status(resolved_id)
+
+        if show_table:
+            console = Console(width=table_width)
+            allocation_label = resolved_id
+            if resolved_name:
+                allocation_label = f'{resolved_name} ({resolved_id})'
+            self._render_allocation_resources_status(
+                data,
+                title=f'Allocation Resources Status ({allocation_label})',
+                console=console,
+            )
+
+        if return_data:
+            return data
+        return None
 
     @staticmethod
     def _resource_gpu_family(instance_type_name):
@@ -1084,6 +1361,12 @@ class CloudRuAPIClient:
             allocation_region = allocation_meta.get('region')
             allocation_name = allocation_meta.get('name')
             row_region = allocation_region or 'Unknown'
+            if allocation_name:
+                allocation_title_label = f'Allocation: {allocation_name} ({current_allocation_id})'
+            else:
+                allocation_title_label = f'Allocation ID: {current_allocation_id}'
+            title_context = f'Workspace: {workspace_label}, {allocation_title_label}'
+            resources_title = f'Available Resources ({title_context})'
 
             normalized = []
             endpoint_errors = []
@@ -1140,7 +1423,10 @@ class CloudRuAPIClient:
 
             if not normalized and endpoint_errors:
                 if show_table:
-                    console.print(Panel(str(endpoint_errors[-1]), title=f'Available Resources Error ({current_allocation_id})'))
+                    console.print(Panel(
+                        str(endpoint_errors[-1]),
+                        title=f'Available Resources Error ({title_context})',
+                    ))
                 all_results[current_allocation_id] = []
                 continue
 
@@ -1167,10 +1453,7 @@ class CloudRuAPIClient:
                 )
             )
 
-            table = Table(title=(
-                f'Available Resources (Workspace: {workspace_label}, '
-                f'Allocation: {current_allocation_id})'
-            ))
+            table = Table(title=resources_title)
             table.add_column('region', style='yellow')
             table.add_column('GPU Type', style='yellow')
             table.add_column('GPUs', justify='center')
@@ -1202,10 +1485,7 @@ class CloudRuAPIClient:
                         message = 'No currently available resources (all rows have available=0).'
                     console.print(Panel(
                         message,
-                        title=(
-                            f'Available Resources (Workspace: {workspace_label}, '
-                            f'Allocation: {current_allocation_id})'
-                        ),
+                        title=resources_title,
                     ))
 
             all_results[current_allocation_id] = normalized
@@ -1334,7 +1614,7 @@ class CloudRuAPIClient:
             show_output (bool, optional): Print rich panel output. Defaults to True.
 
         Returns:
-            str: Formatted string with job status information
+            dict | None: Normalized status data when return_data=True, otherwise None.
         """
         status = self._get_job_status(job_id)
 
@@ -1346,6 +1626,10 @@ class CloudRuAPIClient:
         normalized = {
             'job_id': status.get('job_name', ''),
             'status': str(status.get('status', 'Unknown')).capitalize(),
+            'allocation_id': status.get('allocation_id'),
+            'allocation_name': status.get('allocation_name'),
+            'queue_id': status.get('queue_id'),
+            'queue_name': status.get('queue_name'),
             'error_code': status.get('error_code'),
             'error_message': status.get('error_message', ''),
             'created_at_raw': status.get('created_at'),
@@ -1368,6 +1652,17 @@ class CloudRuAPIClient:
             status_text.append("Status: ", style="bold")
             job_status = normalized['status']
             status_text.append(f"{job_status}\n", style=self.STATUS_STYLES.get(job_status, 'white'))
+
+            scheduling_fields = (
+                ('Allocation ID', 'allocation_id'),
+                ('Allocation name', 'allocation_name'),
+                ('Queue ID', 'queue_id'),
+                ('Queue name', 'queue_name'),
+            )
+            for label, key in scheduling_fields:
+                if normalized[key] is not None:
+                    status_text.append(f"{label}: ", style="bold")
+                    status_text.append(f"{normalized[key]}\n")
 
             status_text.append("Created: ", style="bold")
             status_text.append(f"{normalized['created_at_display']}\n")
@@ -1674,7 +1969,7 @@ class CloudRuAPIClient:
         return rendered_rows
 
     def jobs(self, status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160,
-             return_data=False, show_table=True):
+             return_data=False, show_table=True, allocation_name=None):
         """Display jobs sorted by creation date.
 
         Args:
@@ -1685,6 +1980,7 @@ class CloudRuAPIClient:
             table_width (int, optional): Console table width.
             return_data (bool, optional): Return normalized rows.
             show_table (bool, optional): Print rich table output.
+            allocation_name (str, optional): Allocation name to filter jobs by.
 
         Returns:
             list[dict] | None: Normalized rows when return_data=True.
@@ -1692,7 +1988,7 @@ class CloudRuAPIClient:
         jobs_data = []
         for region in regions:
             jobs_data += self._get_jobs(region=region, offset=0, limit=n_last, status_in=status_in,
-                                        status_not_in=status_not_in)
+                                        status_not_in=status_not_in, allocation_name=allocation_name)
         jobs_data = sorted(jobs_data, key=lambda x: self._parse_api_datetime(x.get('created_dt')), reverse=True)
 
         workspace_label = self._workspace_title_label()

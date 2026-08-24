@@ -26,6 +26,9 @@ job:
   base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
   instance_type: "a100plus.1gpu.80vG.12C.96G"
   region: "SR006"
+  # Optional scheduling targets; Cloud.ru uses workspace/region defaults when omitted
+  # allocation_name: "alloc-priority-sr006"
+  # queue_name: "custom_queue"
   job_type: "binary"
   job_desc: "test job"
   n_workers: 1
