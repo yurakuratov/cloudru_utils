@@ -12,6 +12,25 @@ CREDENTIALS_PATH = CONFIG_DIR / "credentials"
 TOKEN_CACHE_PATH = CONFIG_DIR / "token_cache"
 TELEGRAM_CONFIG_PATH = CONFIG_DIR / "telegram.ini"
 
+SNAPSHOT_STORAGE_KEYS = (
+    "s3_snapshot_prefix", "s3_endpoint_url", "aws_profile", "aws_cli",
+    "aws_config_file", "aws_credentials_file",
+)
+
+
+def load_snapshot_profile(profile: str = "default") -> dict:
+    """Read only snapshot storage settings, without initializing auth/config files."""
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        if CONFIG_PATH.exists():
+            with CONFIG_PATH.open(encoding="utf-8") as stream:
+                config.read_file(stream)
+    except (OSError, UnicodeError, configparser.Error):
+        # ConfigParser exceptions can contain the malformed line, including secrets.
+        raise RuntimeError(f"Cannot read Cloud.ru configuration: {CONFIG_PATH}") from None
+    section = config[profile] if config.has_section(profile) else {}
+    return {key: section.get(key) for key in SNAPSHOT_STORAGE_KEYS}
+
 
 def _read_ini(path: Path) -> configparser.ConfigParser:
     parser = configparser.ConfigParser()

@@ -18,7 +18,10 @@ pip install -e .
 
 ## Credentials and workspace
 
-Both CLI and Python API need:
+The API credentials below are needed for Cloud.ru jobs/resources commands.
+Standalone `cloudru snapshot` commands do not require Cloud.ru API credentials.
+
+Cloud.ru API workflows need:
 - `client_id`
 - `client_secret`
 
@@ -98,6 +101,7 @@ cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- nvidia-smi
 cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- python train.py --epochs 3
 cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs kill lm-mpi-job-xxxx lm-mpi-job-yyyy --yes
+cloudru snapshot . --upload --exclude data --exclude runs
 cloudru bot run
 ```
 
@@ -257,6 +261,42 @@ cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- bash -lc 'n
 ```
 
 Command tokens are safely quoted before being passed to the remote shell, so arguments containing spaces are preserved. Use `bash -lc`, as shown above, when you need pipes, redirects, variable expansion, `cd`, or multiple commands.
+
+## Source snapshots
+
+```bash
+cloudru snapshot . --exclude data --exclude runs
+cloudru snapshot . --upload
+```
+
+Creates one `.tar.gz` from a directory or file. Defaults: `./snapshots`, a 1 GiB
+source limit, and Git ignores for untracked files. The output directory is
+excluded automatically when inside the source. Local creation needs no AWS or
+Cloud.ru credentials; Git is required for Git sources.
+
+For uploads, install AWS CLI and configure a named static-credential profile
+(e.g. `aws configure --profile research`) with access to your S3 bucket.
+Both `~/.aws/config` and `~/.aws/credentials` must exist. Add your upload settings
+to `~/.cloudru/config`, replacing the example values:
+
+```ini
+[default]
+s3_snapshot_prefix = s3://my-bucket/my-user/snapshots
+s3_endpoint_url = https://s3.cloud.ru
+aws_profile = research
+```
+
+`--profile NAME` (or `CLOUDRU_PROFILE`) selects the Cloud.ru config section.
+Override these settings with `--s3-prefix`, `--s3-endpoint-url`, and `--aws-profile`.
+Optional config keys `aws_cli`, `aws_config_file`, and `aws_credentials_file`
+override the executable and standard AWS file paths; matching CLI flags use hyphens.
+Each invocation captures a new snapshot. To upload or retry an existing archive,
+use `aws s3 cp` with your AWS profile and endpoint; copying to the same S3 key replaces it.
+
+Use `--dry-run` to validate without creating or uploading files, `--json` for
+structured output, and `cloudru snapshot --help` for selection and size options.
+Snapshots are independent of job submission.
+
 
 ## Telegram Bot (local run)
 

@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import getpass
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -26,12 +27,19 @@ from cloudru_config import (
     list_auth_profiles,
     load_cached_token,
     load_profile,
+    load_snapshot_profile,
     redact,
     save_cached_token,
     save_profile,
 )
 from cloudru_bot import run_bot
 from cloudru_utils import CloudRuAPIClient
+from cloudru_snapshot import (
+    DEFAULT_MAX_BYTES,
+    create_snapshot,
+    prepare_snapshot,
+)
+from cloudru_storage import resolve_upload_config, upload_snapshot
 
 
 DEFAULT_SOURCE = "auto"
@@ -580,6 +588,89 @@ def cmd_init(
         typer.echo(f"source: {init_source}")
     except typer.Exit:
         raise
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+def _snapshot_settings(ctx, profile, s3_prefix, s3_endpoint_url, aws_profile,
+                       aws_cli, aws_config_file, aws_credentials_file) -> dict:
+    values = load_snapshot_profile(_resolve_profile(ctx, profile))
+    overrides = {
+        "s3_snapshot_prefix": s3_prefix, "s3_endpoint_url": s3_endpoint_url,
+        "aws_profile": aws_profile, "aws_cli": aws_cli,
+        "aws_config_file": aws_config_file, "aws_credentials_file": aws_credentials_file,
+    }
+    values.update({key: value for key, value in overrides.items() if value is not None})
+    return values
+
+
+def _snapshot_protected_paths(values: dict) -> list[Path]:
+    # These paths are never source inputs, even when Git tracks or ignores them.
+    from cloudru_config import TOKEN_CACHE_PATH
+
+    return [CONFIG_PATH, CREDENTIALS_PATH, TOKEN_CACHE_PATH,
+            Path(values.get("aws_config_file") or "~/.aws/config").expanduser(),
+            Path(values.get("aws_credentials_file") or "~/.aws/credentials").expanduser()]
+
+
+def _snapshot_result(result: dict, as_json: bool, *, dry_run=False) -> None:
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=True, indent=2))
+    elif dry_run:
+        typer.echo("Snapshot dry run (no files created or uploaded):")
+        typer.echo(yaml.safe_dump(result, sort_keys=False))
+    else:
+        typer.echo(result["archive_path"])
+        if result.get("s3_uri"):
+            typer.echo(f"Uploaded snapshot: {result['s3_uri']}", err=True)
+
+
+@app.command("snapshot", help="Capture source as a local archive and optionally upload it to S3")
+def cmd_snapshot(
+    ctx: typer.Context,
+    source: str = typer.Argument(..., help="Directory, repository subtree, or single file"),
+    output_dir: str = typer.Option("./snapshots", "--output-dir", "-o"),
+    upload: bool = typer.Option(False, "--upload"),
+    use_gitignore: bool = typer.Option(True, "--use-gitignore/--no-use-gitignore"),
+    exclude: Optional[list[str]] = typer.Option(None, "--exclude", help="Repeatable source-relative exclusion"),
+    exclude_from: Optional[str] = typer.Option(None, "--exclude-from", help="File of exclusion patterns"),
+    max_bytes: int = typer.Option(DEFAULT_MAX_BYTES, "--max-bytes", min=1),
+    s3_prefix: Optional[str] = typer.Option(None, "--s3-prefix"),
+    s3_endpoint_url: Optional[str] = typer.Option(None, "--s3-endpoint-url"),
+    aws_profile: Optional[str] = typer.Option(None, "--aws-profile"),
+    aws_cli: Optional[str] = typer.Option(None, "--aws-cli"),
+    aws_config_file: Optional[str] = typer.Option(None, "--aws-config-file"),
+    aws_credentials_file: Optional[str] = typer.Option(None, "--aws-credentials-file"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
+    as_json: bool = typer.Option(False, "--json"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    debug: bool = typer.Option(False, "--debug"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        if not upload and any(value is not None for value in (
+                s3_prefix, s3_endpoint_url, aws_profile, aws_cli, aws_config_file, aws_credentials_file)):
+            raise RuntimeError("Upload options require --upload")
+        values = _snapshot_settings(ctx, profile, s3_prefix, s3_endpoint_url, aws_profile,
+                                    aws_cli, aws_config_file, aws_credentials_file)
+        storage = resolve_upload_config(values) if upload else None
+        plan = prepare_snapshot(source, output_dir, use_gitignore=use_gitignore,
+                                exclude=exclude, exclude_from=exclude_from, max_bytes=max_bytes,
+                                protected_paths=_snapshot_protected_paths(values))
+        if dry_run:
+            result = {"dry_run": True, "operation": "create", **plan.public_dict(),
+                      "upload": storage.public_dict() if storage else None}
+        else:
+            typer.echo(f"Capturing source: {plan.source}", err=True)
+            result = create_snapshot(plan)
+            if storage:
+                typer.echo("Uploading snapshot to S3", err=True)
+                try:
+                    result = upload_snapshot(result, storage)
+                except Exception:
+                    typer.echo(f"Local snapshot retained: {result['archive_path']}", err=True)
+                    raise
+        _snapshot_result(result, as_json, dry_run=dry_run)
     except Exception as exc:
         _fail(exc, debug_mode)
 
