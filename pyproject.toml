@@ -19,4 +19,4 @@ dependencies = [
 cloudru = "cloudru_cli:main"
 
 [tool.setuptools]
-py-modules = ["cloudru_utils", "cloudru_config", "cloudru_cli", "cloudru_bot", "cloudru_snapshot", "cloudru_storage"]
+py-modules = ["cloudru_utils", "cloudru_config", "cloudru_cli", "cloudru_bot", "cloudru_snapshot", "cloudru_storage", "cloudru_job_runtime", "cloudru_job_submit"]

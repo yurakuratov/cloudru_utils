@@ -20,6 +20,17 @@ SNAPSHOT_STORAGE_KEYS = (
 
 def load_snapshot_profile(profile: str = "default") -> dict:
     """Read only snapshot storage settings, without initializing auth/config files."""
+    return _read_profile_settings(profile, SNAPSHOT_STORAGE_KEYS)
+
+
+def load_submit_profile(profile: str = "default") -> dict:
+    """Read submission defaults without credentials, tokens, or file creation."""
+    values = _read_profile_settings(profile, (*SNAPSHOT_STORAGE_KEYS, "region"))
+    values["region"] = os.getenv("CLOUDRU_REGION", values.get("region"))
+    return values
+
+
+def _read_profile_settings(profile: str, keys) -> dict:
     config = configparser.ConfigParser(interpolation=None)
     try:
         if CONFIG_PATH.exists():
@@ -29,7 +40,7 @@ def load_snapshot_profile(profile: str = "default") -> dict:
         # ConfigParser exceptions can contain the malformed line, including secrets.
         raise RuntimeError(f"Cannot read Cloud.ru configuration: {CONFIG_PATH}") from None
     section = config[profile] if config.has_section(profile) else {}
-    return {key: section.get(key) for key in SNAPSHOT_STORAGE_KEYS}
+    return {key: section.get(key) for key in keys}
 
 
 def _read_ini(path: Path) -> configparser.ConfigParser:

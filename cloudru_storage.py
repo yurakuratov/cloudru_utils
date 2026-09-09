@@ -1,4 +1,4 @@
-"""Validated local AWS CLI context and single-archive snapshot uploads.
+"""Validated AWS CLI contexts and single-archive snapshot transfers.
 
 Only static credentials in an explicitly selected shared-credentials profile are
 supported. AWS CLI ``s3 cp`` handles transfers, including multipart uploads.
@@ -16,9 +16,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlsplit
 
 
@@ -223,6 +225,45 @@ def resolve_upload_config(values: dict) -> UploadConfig:
     return UploadConfig(prefix, endpoint, profile, executable, config_path, credentials_path)
 
 
+def validate_snapshot_uri(uri: str) -> str:
+    """Validate one S3 object reference for submission and remote download."""
+    _prefix(_text(uri, "s3_snapshot_prefix"))
+    key = urlsplit(uri).path[1:]
+    if not key or uri.endswith("/"):
+        raise ValueError("snapshot.uri must have a nonempty object name")
+    if len(key.encode("utf-8")) > 1024:
+        raise ValueError("snapshot.uri exceeds the S3 key length limit")
+    # Percent escapes and repeated slashes belong to the literal S3 key.
+    return uri
+
+
+def resolve_download_config(uri: str, endpoint_url: str, env: dict) -> UploadConfig:
+    """Resolve remote static credentials exclusively from explicit job settings.
+
+    No local upload defaults or ambient AWS selectors fill missing values.
+    The runtime installs its job environment before calling this helper, so
+    executable lookup and explicit tilde paths use the remote HOME/PATH.
+    """
+    uri = validate_snapshot_uri(uri)
+    if not isinstance(env, dict):
+        raise ValueError("Download environment must be a dict")
+    selectors = {
+        "CLOUDRU_AWS_CLI": "aws_cli",
+        "AWS_PROFILE": "aws_profile",
+        "AWS_CONFIG_FILE": "aws_config_file",
+        "AWS_SHARED_CREDENTIALS_FILE": "aws_credentials_file",
+    }
+    missing = [name for name in selectors
+               if not isinstance(env.get(name), str) or not env[name].strip()]
+    if missing:
+        raise ValueError("Missing explicit download settings: " + ", ".join(missing))
+    return resolve_upload_config({
+        "s3_snapshot_prefix": uri.rsplit("/", 1)[0],
+        "s3_endpoint_url": _text(endpoint_url, "s3_endpoint_url"),
+        **{key: env[name] for name, key in selectors.items()},
+    })
+
+
 def _aws_environment(config: UploadConfig) -> dict[str, str]:
     # Preserve local HOME/PATH/proxies, but inherit *no* AWS settings. In
     # particular, a new AWS credential selector cannot evade a stale denylist.
@@ -243,16 +284,48 @@ def _aws_environment(config: UploadConfig) -> dict[str, str]:
     return env
 
 
-def _run(config: UploadConfig, env: dict, operation: str, args: list[str]) -> subprocess.CompletedProcess:
+def _run(config: UploadConfig, env: dict, operation: str, args: list[str], *,
+         retained: str = "local snapshot retained", managed: bool = False) -> subprocess.CompletedProcess:
     command = [config.aws_cli, "--profile", config.aws_profile,
                "--endpoint-url", config.s3_endpoint_url, "--output", "json",
                "--color", "off", "s3", operation, *args]
+    if managed:
+        return _run_managed(command, env, operation, retained)
     try:
         return subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, encoding="utf-8", errors="replace", check=False)
     except (OSError, subprocess.SubprocessError):
-        raise RuntimeError(f"AWS CLI {operation} could not run; local snapshot retained") from None
+        raise RuntimeError(f"AWS CLI {operation} could not run; {retained}") from None
+
+
+def _run_managed(command: list[str], env: dict, operation: str,
+                 retained: str) -> subprocess.CompletedProcess:
+    try:
+        # A private temporary file avoids pipe backpressure while waiting for
+        # AWS. Runtime cancellation uses a custom exception outside OSError so
+        # subprocess internals cannot mistake it for a retryable syscall error.
+        with tempfile.TemporaryFile(mode="w+b") as diagnostics:
+            process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=diagnostics,
+                                       start_new_session=True)
+            try:
+                process.wait()
+            except BaseException:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                finally:
+                    process.wait()
+                raise
+            diagnostics.seek(0)
+            stderr = diagnostics.read(64 * 1024).decode("utf-8", errors="replace")
+            return subprocess.CompletedProcess(command, process.returncode, "", stderr)
+    except InterruptedError:
+        raise
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError(f"AWS CLI {operation} could not run; {retained}") from None
 
 
 def _error_code(result: subprocess.CompletedProcess, operation: str) -> str:
@@ -261,16 +334,17 @@ def _error_code(result: subprocess.CompletedProcess, operation: str) -> str:
     return match.group(1) if match else ""
 
 
-def _failure(operation: str, result: subprocess.CompletedProcess) -> RuntimeError:
-    code = _error_code(result, "PutObject")
+def _failure(operation: str, result: subprocess.CompletedProcess, *,
+             api_operation: str = "PutObject", retained: str = "local snapshot retained") -> RuntimeError:
+    code = _error_code(result, api_operation)
     # Only fixed known labels are safe: AWS diagnostics can echo secrets or
     # arbitrary endpoint responses, so even unknown error codes are suppressed.
     labels = {"403": "access forbidden", "AccessDenied": "access forbidden",
-              "404": "not found", "NoSuchBucket": "bucket not found",
+              "404": "not found", "NoSuchBucket": "bucket not found", "NoSuchKey": "object not found",
               "ExpiredToken": "credentials expired", "InvalidAccessKeyId": "invalid credentials",
               "SignatureDoesNotMatch": "credential signature rejected"}
     label = labels.get(code, "command failed")
-    return RuntimeError(f"AWS CLI {operation}: {label}; local snapshot retained")
+    return RuntimeError(f"AWS CLI {operation}: {label}; {retained}")
 
 
 def _archive_file(value: object, config: UploadConfig) -> tuple[Path, int]:
@@ -316,3 +390,30 @@ def upload_snapshot(snapshot: dict, config: UploadConfig) -> dict:
         raise _failure("cp", result)
     print("Snapshot archive uploaded.", file=sys.stderr)
     return {**snapshot, "s3_uri": uri}
+
+
+def download_snapshot(uri: str, destination: str, config: UploadConfig) -> None:
+    """Download one object using s3 cp, retaining any partial file on failure.
+
+    The caller creates the destination directory and validates/extracts the
+    downloaded package. No listing, metadata, or checksum API calls are issued
+    by this helper; AWS CLI manages the transfer itself.
+    """
+    uri = validate_snapshot_uri(uri)
+    if not isinstance(config, UploadConfig):
+        raise ValueError("config must be a resolved UploadConfig")
+    config = resolve_upload_config(config.public_dict())
+    try:
+        if not isinstance(destination, str) or not destination.strip():
+            raise ValueError
+        path = Path(destination).expanduser().absolute()
+        if (os.path.lexists(path) or not path.parent.is_dir()
+                or any(ord(c) < 32 or ord(c) == 127 for c in str(path))
+                or path.resolve() in config.protected_paths):
+            raise ValueError
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise ValueError("Invalid download destination: require a new file in an existing directory, excluding AWS files") from None
+    result = _run(config, _aws_environment(config), "cp",
+                  [uri, str(path), "--only-show-errors"], retained="partial download retained", managed=True)
+    if result.returncode:
+        raise _failure("cp", result, api_operation="GetObject", retained="partial download retained")

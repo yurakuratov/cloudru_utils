@@ -1,6 +1,7 @@
 """Portable, immutable source snapshots; no Cloud.ru or storage dependencies."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fnmatch
@@ -334,6 +335,12 @@ def _publish_file(temporary: Path, destination: Path) -> None:
         raise RuntimeError(f"Refusing to overwrite finalized snapshot: {destination}") from None
 
 
+def snapshot_filename(source_name: str, created: datetime, source_digest: str, suffix: str) -> str:
+    """Format the archive name; also used to validate destinations before capture."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", source_name).strip("._") or "source"
+    return f"{name[:80]}-{created:%Y%m%d-%H%M%S}-{source_digest[7:19]}-{suffix}.tar.gz"
+
+
 def create_snapshot(plan: SnapshotPlan) -> dict:
     """Capture a validated plan and return finalized archive information."""
     current, git_paths = _scan(plan)
@@ -415,8 +422,7 @@ def create_snapshot(plan: SnapshotPlan) -> dict:
         if len(serialized) > MAX_MANIFEST_BYTES:
             raise RuntimeError("Snapshot manifest exceeds the supported 64 MiB limit")
         (package / "manifest.json").write_bytes(serialized)
-        name = re.sub(r"[^A-Za-z0-9._-]+", "_", plan.source.name).strip("._") or "source"
-        filename = f"{name[:80]}-{created:%Y%m%d-%H%M%S}-{manifest['source_digest'][7:19]}-{uuid.uuid4().hex[:4]}.tar.gz"
+        filename = snapshot_filename(plan.source.name, created, manifest["source_digest"], uuid.uuid4().hex[:4])
         archive = temporary / filename
         entry_by_path = {entry.relative: entry for entry in plan.entries}
         with tarfile.open(archive, "w:gz", compresslevel=6) as tar:
@@ -445,7 +451,7 @@ def create_snapshot(plan: SnapshotPlan) -> dict:
 
 
 def _member_name(name: str) -> str:
-    if not name or name.startswith("/") or "\\" in name:
+    if not name or name.startswith("/") or "\\" in name or "\0" in name:
         raise RuntimeError("Unsafe snapshot archive member")
     name = name.rstrip("/")
     if any(p in ("", ".", "..") for p in name.split("/")):
@@ -472,6 +478,8 @@ def inspect_snapshot(archive_path: str) -> dict:
                     raise RuntimeError("Duplicate snapshot archive member")
                 if not (member.isfile() or member.isdir() or member.issym()):
                     raise RuntimeError("Unsupported special file in snapshot archive")
+                if member.issparse() or not 0 <= member.mode <= 0o7777:
+                    raise RuntimeError("Unsupported sparse file or mode in snapshot archive")
                 if name in ("source", "provenance") and not member.isdir():
                     raise RuntimeError("Snapshot package roots must be directories")
                 if not name.startswith("source/") and member.issym():
@@ -528,6 +536,8 @@ def _validate_links(files: list[dict]) -> None:
     for name, target in links.items():
         if not target:
             raise RuntimeError("Empty symlink target in snapshot")
+        if "\0" in target or "\\" in target:
+            raise RuntimeError("Unsafe symlink target in snapshot")
         parts = list(PurePosixPath(name).parent.parts)
         pending = target.split("/")
         followed = {name}
@@ -556,3 +566,105 @@ def _validate_links(files: list[dict]) -> None:
         if target.startswith("/"):
             raise RuntimeError("Absolute symlink in snapshot")
 
+
+@contextmanager
+def _extraction_parent(root_fd: int, name: str):
+    """Walk validated member parents without following filesystem symlinks."""
+    fd = os.dup(root_fd)
+    try:
+        for part in name.split("/")[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd, name.rsplit("/", 1)[-1]
+    finally:
+        os.close(fd)
+
+
+def extract_snapshot(archive_path: str, destination: str) -> dict:
+    """Validate, then unpack into an existing fresh job directory.
+
+    Only a real .cloudru directory may already exist (including the downloaded
+    archive). Return inspect_snapshot's metadata; keep the archive and any
+    partial extraction on failure. Directory modes are applied last so that
+    read-only source directories can be populated. Symlink modes are preserved
+    where the OS supports changing them without following the link.
+    """
+    path = Path(archive_path).expanduser().absolute()
+    root = Path(destination).expanduser().absolute()
+    try:
+        original = _version(path.lstat())
+        if not stat.S_ISREG(original[2]):
+            raise RuntimeError("Snapshot archive must be a regular file")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as incoming:
+            def unchanged():
+                if (_version(path.lstat()) != original
+                        or _version(os.fstat(incoming.fileno())) != original):
+                    raise RuntimeError("Snapshot archive changed during extraction")
+
+            unchanged()
+            result = inspect_snapshot(str(path))
+            unchanged()
+            # Read all headers before touching the destination. Keep file order
+            # to avoid repeatedly seeking backwards through a gzip stream.
+            with tarfile.open(fileobj=incoming, mode="r:gz") as tar:
+                members = [(_member_name(m.name), m) for m in tar.getmembers()]
+                unchanged()
+                root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    root_identity = os.fstat(root_fd)
+                    for name in os.listdir(root_fd):
+                        if (name != ".cloudru" or not stat.S_ISDIR(
+                                os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode)):
+                            raise RuntimeError("Snapshot destination must be fresh; existing extraction targets are forbidden")
+                    directories = sorted(((n, m) for n, m in members if m.isdir()),
+                                         key=lambda row: row[0].count("/"))
+                    for name, member in directories:
+                        unchanged()
+                        with _extraction_parent(root_fd, name) as (parent, leaf):
+                            os.mkdir(leaf, 0o700, dir_fd=parent)
+                    for name, member in members:
+                        if not member.isfile():
+                            continue
+                        unchanged()
+                        with _extraction_parent(root_fd, name) as (parent, leaf):
+                            output_fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                                | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                            with os.fdopen(output_fd, "wb") as outgoing, tar.extractfile(member) as stream:
+                                remaining = member.size
+                                while remaining:
+                                    block = stream.read(min(CHUNK_SIZE, remaining))
+                                    if not block or len(block) > remaining:
+                                        raise RuntimeError("Truncated or changed snapshot member")
+                                    outgoing.write(block)
+                                    remaining -= len(block)
+                                outgoing.flush()
+                                unchanged()
+                                os.fchmod(outgoing.fileno(), member.mode)
+                    # All validation and regular-file writes precede symlinks.
+                    unchanged()
+                    for name, member in members:
+                        if member.issym():
+                            with _extraction_parent(root_fd, name) as (parent, leaf):
+                                os.symlink(member.linkname, leaf, dir_fd=parent)
+                                if os.chmod in os.supports_follow_symlinks:
+                                    os.chmod(leaf, member.mode, dir_fd=parent, follow_symlinks=False)
+                    for name, member in reversed(directories):
+                        with _extraction_parent(root_fd, name) as (parent, leaf):
+                            directory_fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY
+                                                   | os.O_NOFOLLOW, dir_fd=parent)
+                            try:
+                                os.fchmod(directory_fd, member.mode)
+                            finally:
+                                os.close(directory_fd)
+                    unchanged()
+                    current_root = root.lstat()
+                    if (current_root.st_dev, current_root.st_ino) != (root_identity.st_dev, root_identity.st_ino):
+                        raise RuntimeError("Snapshot destination changed during extraction")
+                finally:
+                    os.close(root_fd)
+        return result
+    except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Cannot extract snapshot archive ({type(exc).__name__}); partial extraction retained") from None

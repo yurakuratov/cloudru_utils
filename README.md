@@ -134,9 +134,9 @@ job:
     HF_HOME: "/home/jovyan/data/.cache/huggingface"
 ```
 
-### `setup` section behavior
+### `setup` behavior for non-snapshot jobs
 
-`setup` is optional. When present, setup steps and `job.script` are executed as one submitted job command.
+For YAML without `snapshot`, `setup` is optional. When present, setup steps and `job.script` are executed as one submitted job command. Both snapshot and non-snapshot jobs support `setup`; snapshot jobs use the ordering described below to initialize the environment before downloading source.
 
 Execution order:
 1. `setup.shell_init`
@@ -295,7 +295,104 @@ use `aws s3 cp` with your AWS profile and endpoint; copying to the same S3 key r
 
 Use `--dry-run` to validate without creating or uploading files, `--json` for
 structured output, and `cloudru snapshot --help` for selection and size options.
-Snapshots are independent of job submission.
+This standalone command remains independent of job submission. Managed submit
+can also capture source or reuse an existing snapshot, as described below.
+
+## Submit a snapshot-backed job
+
+Add `snapshot` to job YAML to capture or reuse a source package, deliver it through
+S3, and extract it before remote setup and execution. Start with the
+[runnable smoke-job template](examples/snapshot-job.yaml), replacing its bucket,
+AWS profiles, remote HOME, image, and instance type for your workspace:
+
+```bash
+# Validate and preview without authentication, writes, network, or submission.
+cloudru jobs submit -f examples/snapshot-job.yaml --dry-run
+
+# Capture, upload, and submit; local AWS overrides do not change remote AWS settings.
+cloudru jobs submit -f examples/snapshot-job.yaml \
+  --snapshot-s3-prefix s3://my-bucket/my-user/snapshots \
+  --s3-endpoint-url https://s3.cloud.ru --aws-profile research \
+  --env HOME=/home/jovyan/my-user --env AWS_PROFILE=research
+```
+
+Choose exactly one snapshot mode:
+
+| YAML field | Behavior |
+| --- | --- |
+| `snapshot.source` | Capture a directory/file and upload before submission. |
+| `snapshot.archive` | Validate and upload an existing local snapshot package. |
+| `snapshot.uri` | Download an existing `s3://` package remotely; no local capture/upload. |
+
+Source mode accepts `output_dir` (default `./snapshots`), `use_gitignore` (default
+`true`), `exclude` (pattern list), `exclude_from` (pattern file), and `max_bytes`
+(default `1073741824`, or 1 GiB). Submit's `--use-gitignore` /
+`--no-use-gitignore` overrides YAML only when explicitly supplied. Capture options
+do not apply to archive/URI reuse.
+
+`s3` accepts `endpoint_url`, `snapshot_prefix`, and `local` settings `aws_cli`,
+`profile`, `config_file`, and `credentials_file`. Shared storage and local AWS
+settings resolve as CLI > YAML > selected Cloud.ru profile > defaults. The
+profile keys are the same as for standalone snapshots above. Local overrides are
+`--snapshot-s3-prefix`, `--s3-endpoint-url`, `--aws-cli`, `--aws-profile`,
+`--aws-config-file`, and `--aws-credentials-file`; standalone snapshot keeps
+`--s3-prefix`. Relative local paths resolve from the terminal's current directory,
+including source, archive, output directory, exclusion file, and local AWS file/executable
+paths. The location of the YAML file does not change their meaning. Local `~`
+expands on the submitting machine. URI mode requires no local AWS
+installation/files or upload prefix.
+
+Managed jobs require an absolute remote `HOME` in `job.env_variables` (or
+`--env` overrides). `AWS_PROFILE` is optional and defaults to `default`, selecting
+`[default]` in the remote AWS files. Remote defaults are:
+
+| Variable | Default |
+| --- | --- |
+| `AWS_PROFILE` | `default` |
+| `CLOUDRU_JOBS_ROOT` | `<HOME>/data/jobs` |
+| `AWS_CONFIG_FILE` | `<HOME>/.aws/config` |
+| `AWS_SHARED_CREDENTIALS_FILE` | `<HOME>/.aws/credentials` |
+| `CLOUDRU_AWS_CLI` | `aws` in the remote startup PATH |
+
+Remote settings come only from `--env`, YAML environment variables, and these
+defaults. AWS files must already exist remotely, with the selected static-credential
+profile; credential files are not copied from the submitting machine. The image
+must provide Bash and AWS CLI before activation. The bootstrap applies the remote
+environment and resolves AWS to an absolute path, then runs `setup.shell_init`
+and activates `setup.conda_env`. It uses `python` (or `python3` if `python` is absent)
+from the resulting PATH and requires version 3.9+.
+
+Only three generated variables are reserved: `CLOUDRU_JOB_DIR`,
+`CLOUDRU_SOURCE_DIR`, and `CLOUDRU_SNAPSHOT_URI`. The job directory is
+`<CLOUDRU_JOBS_ROOT>/<sanitized-snapshot-basename>-<4hex>`. Source
+extracts into `<CLOUDRU_JOB_DIR>/source`. The bootstrap refuses an existing job
+directory.
+
+Execution order is remote context → resolve AWS → shell initialization
+→ conda activation → download/validate/extract → `setup.pre_command` → optional HF auth check → working-directory
+change → prepared diagnostics → `job.script`. The default working directory is
+`${CLOUDRU_SOURCE_DIR}`. Pre-commands run before that change, so use
+`$CLOUDRU_SOURCE_DIR` when preparing source paths. Scripts choose and create their
+own output directories. Initialization and activation run once and must work before
+snapshot files exist; put source-dependent preparation in `setup.pre_command`.
+
+For snapshot jobs, `job.conda_env` translates into setup and is omitted from the
+API payload, so the Bash bootstrap controls activation before starting Python. Nonempty
+`job.flags` is rejected; put command arguments directly in `job.script` so they
+apply to the experiment rather than the outer bootstrap wrapper.
+
+`.cloudru/` stores resolved configuration (`config.yaml`), package and system details
+(`packages.txt`, `system.txt`), full environments after activation and preparation
+(`environment.startup.json`, `environment.prepared.json`), and execution status
+(`status.json`). Environment captures may contain secrets. Directories use mode
+`0700`, diagnostic files `0600`; optional diagnostic failures do not stop training.
+Console logs remain in Cloud.ru.
+
+Managed execution supports one binary job with one worker and one process per
+worker, without automatic retries. No local job mapping or submission receipt is created. Managed
+snapshots require the bootstrap; `--no-bootstrap` is unsupported for them. Non-snapshot
+jobs retain their own setup and submission behavior. See the
+[snapshot job example](examples/snapshot-job.yaml) for configuration.
 
 
 ## Telegram Bot (local run)
@@ -442,6 +539,7 @@ cloud_client.kill_job(job_id, region="SR006")
 ## Example script and job yaml:
 - `examples/example.sh`
 - `examples/job.yaml`
+- [Managed snapshot job](examples/snapshot-job.yaml)
 
 ## Example notebook (a bit outdated)
 
