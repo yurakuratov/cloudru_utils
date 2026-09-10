@@ -60,6 +60,8 @@ def load_profile(profile: str = "default", include_env: bool = True) -> dict:
         "x_workspace_id": None,
         "region": None,
         "source": None,
+        "default_allocation": None,
+        "default_allocation_region": None,
     }
 
     if credentials.has_section(profile):
@@ -73,6 +75,8 @@ def load_profile(profile: str = "default", include_env: bool = True) -> dict:
         section = config[profile]
         data["region"] = section.get("region")
         data["source"] = section.get("source")
+        data["default_allocation"] = section.get("default_allocation", "").strip() or None
+        data["default_allocation_region"] = section.get("default_allocation_region", "").strip() or None
 
     if include_env:
         data["client_id"] = os.getenv("CLOUDRU_CLIENT_ID", data["client_id"])
@@ -83,6 +87,36 @@ def load_profile(profile: str = "default", include_env: bool = True) -> dict:
         data["source"] = os.getenv("CLOUDRU_SOURCE", data["source"])
 
     return data
+
+
+def load_default_allocation(profile: str = "default") -> dict:
+    """Read allocation defaults without credentials, environment overrides, or file creation."""
+    config = _read_ini(CONFIG_PATH)
+    section = config[profile] if config.has_section(profile) else {}
+    return {key: section.get(key, "").strip() or None
+            for key in ("default_allocation", "default_allocation_region")}
+
+
+def save_default_allocation(profile: str, allocation_name: str | None, region: str | None = None) -> None:
+    """Set or clear only a profile's allocation defaults in the non-secret config."""
+    if allocation_name is not None and (not allocation_name.strip() or not region or not region.strip()):
+        raise ValueError("Default allocation requires a non-empty name and region")
+    config = _read_ini(CONFIG_PATH)
+    if allocation_name is None:
+        if not config.has_section(profile):
+            return
+        changed = config.remove_option(profile, "default_allocation")
+        changed = config.remove_option(profile, "default_allocation_region") or changed
+        if not changed:
+            return
+    else:
+        if not config.has_section(profile):
+            config.add_section(profile)
+        config[profile]["default_allocation"] = allocation_name
+        config[profile]["default_allocation_region"] = region
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CONFIG_PATH.open("w", encoding="utf-8") as stream:
+        config.write(stream)
 
 
 def save_profile(

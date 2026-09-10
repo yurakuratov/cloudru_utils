@@ -43,6 +43,7 @@ cloudru --install-completion
 
 # Check workspace and jobs
 cloudru workspace info
+cloudru workspace list
 cloudru allocations list
 cloudru jobs list
 
@@ -62,11 +63,23 @@ Main commands:
 
 ```bash
 cloudru workspace info
+cloudru workspace list
 cloudru allocations list
+cloudru allocations use alloc-airi-master-jobs-h100-sr006
+cloudru allocations queue
+cloudru allocations workloads
+cloudru allocations status
 cloudru allocations show 00000000-0000-4000-8000-000000000000
-cloudru allocations show alloc-priority-sr006
-cloudru allocations status alloc-priority-sr006
+cloudru allocations show alloc-airi-master-jobs-h100-sr006
+cloudru allocations status alloc-airi-master-jobs-h100-sr006
 cloudru allocations status 00000000-0000-4000-8000-000000000000 --json
+cloudru allocations queue alloc-airi-master-jobs-h100-sr006
+cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --status Running --n 50
+cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --queue default --workspace-id <workspace-uuid>
+cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --json
+cloudru allocations workloads alloc-airi-master-jobs-h100-sr006
+cloudru allocations workloads alloc-airi-master-jobs-h100-sr006 --type job
+cloudru allocations workloads alloc-airi-master-jobs-h100-sr006 --type notebook --json
 cloudru resources instance-types --region SR006
 cloudru resources available
 cloudru resources available --all
@@ -79,12 +92,12 @@ cloudru resources cost --all --group-by profile,region,n_gpus
 cloudru resources cost --n-gpus 1 --json
 cloudru jobs list
 cloudru jobs list --n 20 --status Running,Pending
-cloudru jobs list --allocation-name alloc-priority-sr006
+cloudru jobs list --allocation-name alloc-airi-master-jobs-h100-sr006
 cloudru jobs finished --n 20
 cloudru jobs finished --status Completed,Succeeded --n 20
 cloudru jobs submit -f job.yaml --dry-run
 cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
-cloudru jobs submit -f job.yaml --allocation-name alloc-priority-sr006 --queue-name custom_queue
+cloudru jobs submit -f job.yaml --allocation-name alloc-airi-master-jobs-h100-sr006
 cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
 cloudru jobs submit -f job.yaml --json
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -121,7 +134,7 @@ job:
   base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
   instance_type: "a100plus.1gpu.80vG.12C.96G"
   region: "SR006"
-  # allocation_name: "alloc-priority-sr006"  # optional; default allocation when omitted
+  # allocation_name: "alloc-airi-master-jobs-h100-sr006"  # optional; saved profile default, then Cloud.ru default
   job_type: "binary"
   job_desc: "quick run"
   n_workers: 1
@@ -162,12 +175,45 @@ Use `job.env_variables` for static environment variables, and `setup.pre_command
 
 Config files:
 - `~/.cloudru/credentials` - `client_id`, `client_secret`, `x_api_key`, `x_workspace_id`
-- `~/.cloudru/config` - defaults like `region`, `source`
+- `~/.cloudru/config` - defaults like `region`, `source`, `default_allocation`, `default_allocation_region`
 - `~/.cloudru/token_cache` - cached access token per profile
 
 Profile selection:
 - `--profile`
 - `CLOUDRU_PROFILE`
+
+### Allocations
+
+Choose an allocation once to avoid typing its name every time:
+
+```bash
+cloudru allocations list
+cloudru allocations use alloc-airi-master-jobs-h100-sr006
+```
+
+The default is saved for your profile in `~/.cloudru/config`.
+
+| Command | What it shows |
+| --- | --- |
+| `cloudru allocations queue` | Running and waiting jobs across workspaces; requires custom queues |
+| `cloudru allocations workloads` | Jobs and notebooks assigned to nodes; also works without custom queues |
+| `cloudru allocations status` | Resource usage and availability |
+| `cloudru allocations show` | Allocation details |
+
+Common filters and a one-off allocation override:
+
+```bash
+cloudru allocations queue --status Pending
+cloudru allocations workloads --type notebook
+cloudru allocations queue alloc-airi-master-jobs-h100-sr006
+cloudru allocations workloads alloc-airi-master-jobs-h100-sr006
+```
+
+Submissions also use the saved allocation when CLI/YAML omits one. If the job
+also omits its region, the saved allocation's region is used.
+
+Run `cloudru allocations use` to see your default, or add `--clear` to remove it.
+Use `--help` on any command for more options.
 
 ### Report job costs
 
@@ -308,7 +354,7 @@ cloud_client = CloudRuAPIClient(
 )
 
 cloud_client.jobs(n_last=10)
-cloud_client.jobs(n_last=10, allocation_name="alloc-priority-sr006")
+cloud_client.jobs(n_last=10, allocation_name="alloc-airi-master-jobs-h100-sr006")
 cloud_client.job_status("lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
 ```
 
@@ -329,7 +375,7 @@ resp = cloud_client.submit_job(
     base_image="cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40",
     instance_type="a100plus.1gpu.80vG.12C.96G",
     region="SR006",
-    # allocation_name="alloc-priority-sr006",
+    # allocation_name="alloc-airi-master-jobs-h100-sr006",
     job_type="binary",
     n_workers=1,
     processes_per_worker=1,
@@ -352,7 +398,11 @@ cloud_client.workspace_info(refresh=False)
 allocation_id = "00000000-0000-4000-8000-000000000000"
 cloud_client.allocations()
 cloud_client.allocation_info(allocation_id)
-cloud_client.allocation_status("alloc-priority-sr006")
+cloud_client.allocation_status("alloc-airi-master-jobs-h100-sr006")
+cloud_client.allocation_queue("alloc-airi-master-jobs-h100-sr006", status_in=["Running"], n_last=50)
+rows = cloud_client.allocation_queue(allocation_id, return_data=True, show_table=False)
+cloud_client.allocation_workloads(allocation_id)
+notebooks = cloud_client.allocation_workloads(allocation_id, types=["notebook"], return_data=True, show_table=False)
 
 # Supported instance types in region
 cloud_client.instance_types(region="SR006")
@@ -383,14 +433,17 @@ cloud_client.kill_job(job_id, region="SR006")
 - `kill_job(job_id, region='SR006')`
 - `get_workspace_info(refresh=True)`
 - `workspace_info(refresh=True)`
+- `workspaces(table_width=160, return_data=False, show_table=True)`
 - `allocations(table_width=160, return_data=False, show_table=True)`
 - `allocation_info(allocation_id, table_width=160, return_data=False, show_table=True)`
 - `allocation_status(allocation_id, table_width=160, return_data=False, show_table=True)`
+- `allocation_queue(allocation_id, status_in=None, status_not_in=None, regions=None, queues=None, workspace_id=None, n_last=20, table_width=160, return_data=False, show_table=True)`
+- `allocation_workloads(allocation_id, types=None, status_in=None, status_not_in=None, n_last=None, table_width=160, return_data=False, show_table=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
 - `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
 - `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True)`
 
-`allocation_info()` and `allocation_status()` accept either an allocation UUID or an exact, case-sensitive allocation name.
+`allocation_info()`, `allocation_status()`, `allocation_queue()`, and `allocation_workloads()` accept either an allocation UUID or an exact, case-sensitive allocation name.
 
 ## Notes
 
