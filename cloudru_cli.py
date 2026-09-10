@@ -11,6 +11,7 @@ import re
 import shlex
 import subprocess
 import traceback
+import uuid
 from typing import Optional
 
 import typer
@@ -29,9 +30,11 @@ from cloudru_config import (
     load_profile,
     load_snapshot_profile,
     load_submit_profile,
+    load_default_allocation,
     redact,
     save_cached_token,
     save_profile,
+    save_default_allocation,
 )
 from cloudru_bot import run_bot
 from cloudru_utils import CloudRuAPIClient
@@ -113,6 +116,37 @@ def _resolve_debug(ctx: typer.Context, debug: bool) -> bool:
     if ctx.obj:
         return bool(ctx.obj.get("debug", False))
     return False
+
+
+def _resolve_allocation(allocation: Optional[str], cfg: dict) -> str:
+    if allocation is not None:
+        if not allocation.strip():
+            raise RuntimeError("Allocation must not be blank")
+        return allocation
+    default = cfg.get("default_allocation")
+    if default and default.strip():
+        return default
+    raise RuntimeError(
+        "Allocation is required. Supply an allocation argument or run "
+        "`cloudru allocations use <name-or-uuid>` for the selected profile."
+    )
+
+
+def _apply_submit_profile_defaults(submit_kwargs: dict, cfg: dict) -> None:
+    """Apply profile scheduling defaults after YAML and explicit CLI overrides."""
+    allocation = submit_kwargs.get("allocation_name")
+    if allocation is not None and not isinstance(allocation, str):
+        raise RuntimeError("allocation_name must be a string")
+    using_default = False
+    if not allocation or not allocation.strip():
+        submit_kwargs.pop("allocation_name", None)
+        if cfg.get("default_allocation"):
+            submit_kwargs["allocation_name"] = cfg["default_allocation"]
+            using_default = True
+    region = submit_kwargs.get("region")
+    if not region or (isinstance(region, str) and not region.strip()):
+        allocation_region = cfg.get("default_allocation_region") if using_default else None
+        submit_kwargs["region"] = allocation_region or cfg.get("region") or "SR006"
 
 
 def _fail(exc: Exception, debug: bool) -> None:
@@ -688,6 +722,24 @@ def cmd_snapshot(
         _fail(exc, debug_mode)
 
 
+@workspace_app.command("list", help="List accessible workspaces with their names, namespaces, and IDs")
+def cmd_workspace_list(
+    ctx: typer.Context,
+    as_json: bool = typer.Option(False, "--json", help="Print workspace rows as JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        data = client.workspaces(table_width=table_width, return_data=as_json, show_table=not as_json)
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
 @workspace_app.command("info", help="Show current workspace information")
 def cmd_workspace_info(
     ctx: typer.Context,
@@ -725,10 +777,120 @@ def cmd_allocations_list(
         _fail(exc, debug_mode)
 
 
+@allocations_app.command("use", help="Set, show, or clear the selected profile's default allocation for inspection and submission")
+def cmd_allocations_use(
+    ctx: typer.Context,
+    allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; omit to show the default", metavar="ALLOCATION"),
+    clear: bool = typer.Option(False, "--clear", help="Remove the saved default allocation and its region"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        profile_name = _resolve_profile(ctx, profile)
+        if clear and allocation is not None:
+            raise RuntimeError("Do not combine an allocation argument with --clear")
+        if clear:
+            save_default_allocation(profile_name, None)
+            typer.echo(f"Profile '{profile_name}': default allocation cleared")
+            return
+        if allocation is None:
+            saved = load_default_allocation(profile_name)
+            name = saved["default_allocation"]
+            if not name:
+                typer.echo(f"Profile '{profile_name}': default allocation not configured")
+            else:
+                typer.echo(f"Profile '{profile_name}': {name} (region: {saved['default_allocation_region'] or 'not configured'})")
+            return
+        if not allocation.strip():
+            raise RuntimeError("Allocation must not be blank")
+        try:
+            selector_id = str(uuid.UUID(allocation))
+        except ValueError:
+            selector_id = None
+        client, _ = _build_client(profile_name)
+        available = client.allocations(return_data=True, show_table=False)
+        matches = [item for item in available if
+                   (item.get('id') == selector_id if selector_id else item.get('name') == allocation)]
+        if not matches:
+            raise RuntimeError(f"Allocation {allocation!r} was not found in available allocations")
+        if len(matches) > 1:
+            raise RuntimeError(f"Allocation {allocation!r} is ambiguous; use its UUID")
+        selected = matches[0]
+        name, region = selected.get('name'), selected.get('region_key')
+        if not isinstance(name, str) or not name.strip() or not isinstance(region, str) or not region.strip():
+            raise RuntimeError("Selected allocation is missing its name or region; default was not saved")
+        save_default_allocation(profile_name, name, region)
+        typer.echo(f"Profile '{profile_name}': default allocation set to {name} (region: {region})")
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@allocations_app.command("queue", help="Show jobs running or waiting in allocation queues; requires custom queues")
+def cmd_allocations_queue(
+    ctx: typer.Context,
+    allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
+    region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable local filter; default: all allocation regions"),
+    status: Optional[list[str]] = typer.Option(None, "--status", help="Repeatable or comma-separated"),
+    status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Repeatable or comma-separated"),
+    queue: Optional[list[str]] = typer.Option(None, "--queue", help="Queue UUID or exact name; repeatable"),
+    workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="Filter by owning workspace UUID"),
+    n: int = typer.Option(20, "--n", min=1, help="Maximum jobs across all selected queues"),
+    as_json: bool = typer.Option(False, "--json", help="Print normalized job rows as JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        normalized_status = _normalize_status_list(status or [], "--status")
+        normalized_status_not = _normalize_status_list(status_not or [], "--status-not")
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
+        data = client.allocation_queue(
+            _resolve_allocation(allocation, cfg), status_in=normalized_status, status_not_in=normalized_status_not,
+            regions=region, queues=queue, workspace_id=workspace_id, n_last=n,
+            table_width=table_width, return_data=as_json, show_table=not as_json,
+        )
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+@allocations_app.command("workloads", help="Show jobs and notebooks assigned to allocation nodes; excludes work waiting for nodes")
+def cmd_allocations_workloads(
+    ctx: typer.Context,
+    allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
+    workload_type: Optional[list[str]] = typer.Option(None, "--type", help="job or notebook; repeatable; default: both"),
+    status: Optional[list[str]] = typer.Option(None, "--status", help="Case-insensitive; repeatable or comma-separated"),
+    status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Exclude statuses; repeatable or comma-separated"),
+    n: Optional[int] = typer.Option(None, "--n", min=1, help="Maximum workloads; default: all, newest first"),
+    as_json: bool = typer.Option(False, "--json", help="Print workload rows as JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        types = [kind.lower() for kind in workload_type or []]
+        if any(kind not in ('job', 'notebook') for kind in types):
+            raise RuntimeError('Workload type must be job or notebook')
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
+        data = client.allocation_workloads(
+            _resolve_allocation(allocation, cfg), types=types, status_in=_parse_csv_options(status or []),
+            status_not_in=_parse_csv_options(status_not or []), n_last=n,
+            table_width=table_width, return_data=as_json, show_table=not as_json,
+        )
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
 @allocations_app.command("show", help="Show allocation details")
 def cmd_allocations_show(
     ctx: typer.Context,
-    allocation: str = typer.Argument(..., help="Allocation UUID or exact name", metavar="ALLOCATION"),
+    allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
     as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
     table_width: int = typer.Option(160, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -736,9 +898,9 @@ def cmd_allocations_show(
 ) -> None:
     debug_mode = _resolve_debug(ctx, debug)
     try:
-        client, _ = _build_client(_resolve_profile(ctx, profile))
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
         data = client.allocation_info(
-            allocation,
+            _resolve_allocation(allocation, cfg),
             table_width=table_width,
             return_data=as_json,
             show_table=not as_json,
@@ -752,7 +914,7 @@ def cmd_allocations_show(
 @allocations_app.command("status", help="Show allocation resource status")
 def cmd_allocations_status(
     ctx: typer.Context,
-    allocation: str = typer.Argument(..., help="Allocation UUID or exact name", metavar="ALLOCATION"),
+    allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
     as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
     table_width: int = typer.Option(160, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -760,9 +922,9 @@ def cmd_allocations_status(
 ) -> None:
     debug_mode = _resolve_debug(ctx, debug)
     try:
-        client, _ = _build_client(_resolve_profile(ctx, profile))
+        client, cfg = _build_client(_resolve_profile(ctx, profile))
         data = client.allocation_status(
-            allocation,
+            _resolve_allocation(allocation, cfg),
             table_width=table_width,
             return_data=as_json,
             show_table=not as_json,
@@ -1046,7 +1208,7 @@ def cmd_jobs_list(
     region: Optional[list[str]] = typer.Option(None, "--region", help="Repeatable; default from profile"),
     status: Optional[list[str]] = typer.Option(None, "--status", help="Repeatable or comma-separated"),
     status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Repeatable or comma-separated"),
-    allocation_name: Optional[str] = typer.Option(None, "--allocation-name", help="Filter by allocation name"),
+    allocation_name: Optional[str] = typer.Option(None, "--allocation-name", help="Filter jobs within the current workspace by allocation name"),
     n: int = typer.Option(20, "--n", min=1),
     table_width: int = typer.Option(160, "--table-width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -1277,7 +1439,7 @@ def cmd_jobs_submit(
     region: Optional[str] = typer.Option(None, "--region"),
     job_type: Optional[str] = typer.Option(None, "--job-type"),
     job_desc: Optional[str] = typer.Option(None, "--job-desc"),
-    allocation_name: Optional[str] = typer.Option(None, "--allocation-name"),
+    allocation_name: Optional[str] = typer.Option(None, "--allocation-name", help="Override YAML allocation; otherwise uses YAML or the profile default"),
     queue_name: Optional[str] = typer.Option(None, "--queue-name"),
     n_workers: Optional[int] = typer.Option(None, "--n-workers", min=1),
     processes_per_worker: Optional[int] = typer.Option(None, "--processes-per-worker", min=1),
@@ -1303,6 +1465,8 @@ def cmd_jobs_submit(
     debug_mode = _resolve_debug(ctx, debug)
     managed = None
     try:
+        if allocation_name is not None and not allocation_name.strip():
+            raise RuntimeError("--allocation-name must not be blank")
         selected_profile = _resolve_profile(ctx, profile)
         document = _load_job_document(file)
         setup_cfg, raw_job_cfg = _job_sections(document)
@@ -1320,9 +1484,6 @@ def cmd_jobs_submit(
         if not is_managed and (use_gitignore is not None or any(value is not None for value in storage_overrides.values())):
             raise RuntimeError("Snapshot CLI options require a snapshot section in YAML")
 
-        if "region" not in submit_kwargs or not submit_kwargs.get("region"):
-            submit_kwargs["region"] = cfg.get("region") or "SR006"
-
         overrides = {
             "script": script,
             "base_image": base_image,
@@ -1339,6 +1500,7 @@ def cmd_jobs_submit(
         for key, value in overrides.items():
             if value is not None:
                 submit_kwargs[key] = value
+        _apply_submit_profile_defaults(submit_kwargs, cfg)
 
         env_overrides = _parse_env_overrides(env or [])
         if env_overrides:
