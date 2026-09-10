@@ -618,6 +618,24 @@ def cmd_init(
         _fail(exc, debug_mode)
 
 
+@workspace_app.command("list", help="List accessible workspaces with their names, namespaces, and IDs")
+def cmd_workspace_list(
+    ctx: typer.Context,
+    as_json: bool = typer.Option(False, "--json", help="Print workspace rows as JSON"),
+    table_width: int = typer.Option(160, "--table-width"),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
+    debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        client, _ = _build_client(_resolve_profile(ctx, profile))
+        data = client.workspaces(table_width=table_width, return_data=as_json, show_table=not as_json)
+        if as_json:
+            typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
 @workspace_app.command("info", help="Show current workspace information")
 def cmd_workspace_info(
     ctx: typer.Context,

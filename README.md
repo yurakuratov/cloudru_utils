@@ -43,6 +43,7 @@ cloudru --install-completion
 
 # Check workspace and jobs
 cloudru workspace info
+cloudru workspace list
 cloudru allocations list
 cloudru jobs list
 
@@ -62,6 +63,7 @@ Main commands:
 
 ```bash
 cloudru workspace info
+cloudru workspace list
 cloudru allocations list
 cloudru allocations use alloc-airi-master-jobs-h100-sr006
 cloudru allocations queue
@@ -431,6 +433,7 @@ cloud_client.kill_job(job_id, region="SR006")
 - `kill_job(job_id, region='SR006')`
 - `get_workspace_info(refresh=True)`
 - `workspace_info(refresh=True)`
+- `workspaces(table_width=160, return_data=False, show_table=True)`
 - `allocations(table_width=160, return_data=False, show_table=True)`
 - `allocation_info(allocation_id, table_width=160, return_data=False, show_table=True)`
 - `allocation_status(allocation_id, table_width=160, return_data=False, show_table=True)`

@@ -418,6 +418,47 @@ class CloudRuAPIClient:
         response = self._request_with_auth('get', url, headers=headers)
         return response.json()
 
+    def _get_workspaces(self, timeout=30):
+        """List the authenticated user's workspaces, including namespace/name mappings."""
+        self._refresh_token()
+        response = self._request_with_auth(
+            'get', f'{self.API_URL}/workspaces/v3/',
+            headers={'accept': 'application/json', 'authorization': self.access_token},
+            timeout=timeout,
+        )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f'List workspaces failed (HTTP {response.status_code}) with non-JSON response') from exc
+        if response.status_code >= 400:
+            raise RuntimeError(f'List workspaces failed (HTTP {response.status_code}): {data}')
+        workspaces = data.get('workspaces') if isinstance(data, dict) else None
+        if not isinstance(workspaces, list) or not all(
+            isinstance(workspace, dict) and all(
+                isinstance(workspace.get(key), str) and workspace[key]
+                for key in ('id', 'name', 'namespace')
+            ) for workspace in workspaces
+        ):
+            raise RuntimeError("Unexpected workspace list. Expected 'workspaces' objects with id, name, and namespace.")
+        return workspaces
+
+    def workspaces(self, table_width=160, return_data=False, show_table=True):
+        """Show workspaces accessible to the authenticated user, sorted by name."""
+        data = sorted(self._get_workspaces(), key=lambda workspace: workspace['name'].casefold())
+        if show_table:
+            table = Table(title='Workspaces')
+            table.add_column('Name', style='magenta', overflow='fold')
+            table.add_column('Namespace', style='cyan', overflow='fold')
+            table.add_column('Workspace ID', overflow='fold')
+            table.add_column('Project', overflow='fold')
+            for workspace in data:
+                table.add_row(
+                    Text(workspace['name']), Text(workspace['namespace']), Text(workspace['id']),
+                    Text(workspace.get('project_name') or workspace.get('project_id') or ''),
+                )
+            Console(width=table_width).print(table)
+        return data if return_data else None
+
     def _get_allocation_api(self, path, operation, expected_type, params=None):
         """Call a read-only allocation endpoint and validate its top-level response."""
         self._refresh_token()
@@ -511,6 +552,45 @@ class CloudRuAPIClient:
             and isinstance(workspace.get('id'), str) and workspace['id']
             and isinstance(workspace.get('name'), str) and workspace['name']
         }
+
+    def _resolve_workload_workspaces(self, rows, workloads, allocation_id):
+        """Resolve displayed rows using existing job metadata before one optional lookup."""
+        namespace_ids = {}
+        for workload in workloads:
+            if workload['namespace'] and workload['workspace_id']:
+                namespace_ids.setdefault(workload['namespace'], set()).add(workload['workspace_id'])
+        for row in rows:
+            matches = namespace_ids.get(row['namespace'], set())
+            if not row['workspace_id'] and len(matches) == 1:
+                row['workspace_id'] = next(iter(matches))
+
+        if any(row['workspace_id'] for row in rows):
+            names = self._get_allocation_workspace_names(allocation_id)
+            for row in rows:
+                row['workspace_name'] = names.get(row['workspace_id'])
+
+        unresolved = [row for row in rows if not row['workspace_name']
+                      and (row['workspace_id'] or row['namespace'])]
+        if not unresolved:
+            return
+        try:
+            workspaces = self._get_workspaces(timeout=5)
+        except (RuntimeError, requests.RequestException):
+            # Name enrichment must not prevent displaying workloads on API failure.
+            return
+        by_id = {workspace['id']: workspace for workspace in workspaces}
+        by_namespace = {}
+        for workspace in workspaces:
+            by_namespace.setdefault(workspace['namespace'], []).append(workspace)
+        for row in unresolved:
+            if row['workspace_id']:
+                workspace = by_id.get(row['workspace_id'])
+            else:
+                matches = by_namespace.get(row['namespace'], [])
+                workspace = matches[0] if len(matches) == 1 else None
+            if workspace:
+                row['workspace_id'] = workspace['id']
+                row['workspace_name'] = workspace['name']
 
     def allocation_queue(self, allocation_id, status_in=None, status_not_in=None, regions=None,
                         queues=None, workspace_id=None, n_last=20, table_width=160,
@@ -635,8 +715,6 @@ class CloudRuAPIClient:
         grouped = {}
         for load in loads:
             for kind, field in (('job', 'jobs'), ('notebook', 'notebooks')):
-                if types and kind not in types:
-                    continue
                 for item in load[field]:
                     # A workload can occur on several nodes. Its declared GPU
                     # count is a workload total, not a value to sum per node.
@@ -665,7 +743,8 @@ class CloudRuAPIClient:
         include = {value.casefold() for value in status_in or []}
         exclude = {value.casefold() for value in status_not_in or []}
         rows = [row for row in grouped.values()
-                if (not include or str(row['status']).casefold() in include)
+                if (not types or row['type'] in types)
+                and (not include or str(row['status']).casefold() in include)
                 and str(row['status']).casefold() not in exclude]
         def created_order(row):
             parsed = self._parse_allocation_job_datetime(row['created_at'])
@@ -673,10 +752,7 @@ class CloudRuAPIClient:
         rows.sort(key=created_order, reverse=True)
         if n_last is not None:
             rows = rows[:n_last]
-        if any(row['workspace_id'] for row in rows):
-            workspace_names = self._get_allocation_workspace_names(resolved_id)
-            for row in rows:
-                row['workspace_name'] = workspace_names.get(row['workspace_id'])
+        self._resolve_workload_workspaces(rows, grouped.values(), resolved_id)
         for row in rows:
             row['nodes'].sort()
         if show_table:
