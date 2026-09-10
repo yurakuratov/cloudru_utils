@@ -17,7 +17,7 @@ from rich.text import Text
 
 import requests
 import time
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 
 
 def get_jobs(status_in=[], status_not_in=[], regions=['SR006']):
@@ -418,7 +418,7 @@ class CloudRuAPIClient:
         response = self._request_with_auth('get', url, headers=headers)
         return response.json()
 
-    def _get_allocation_api(self, path, operation, expected_type):
+    def _get_allocation_api(self, path, operation, expected_type, params=None):
         """Call a read-only allocation endpoint and validate its top-level response."""
         self._refresh_token()
         url = f'{self.API_URL}{path}'
@@ -429,7 +429,8 @@ class CloudRuAPIClient:
             'authorization': self.access_token,
         }
 
-        response = self._request_with_auth('get', url, headers=headers)
+        request_options = {'params': params} if params is not None else {}
+        response = self._request_with_auth('get', url, headers=headers, **request_options)
         try:
             data = response.json()
         except ValueError as exc:
@@ -452,6 +453,261 @@ class CloudRuAPIClient:
         if not all(isinstance(item, dict) for item in data):
             raise RuntimeError('Unexpected response from List allocations. Expected an array of objects.')
         return data
+
+    def _get_allocation_queues(self, allocation_id):
+        try:
+            data = self._get_allocation_api(
+                '/queues/', f'List queues for allocation {allocation_id}', list,
+                params={'allocation_id': allocation_id},
+            )
+        except RuntimeError as exc:
+            if 'HTTP 409' in str(exc) and 'Custom queues are not activated' in str(exc):
+                raise RuntimeError(
+                    f'{exc}. Use cloudru allocations workloads {allocation_id} '
+                    'to see jobs and notebooks assigned to nodes.'
+                ) from exc
+            raise
+        if not all(isinstance(queue, dict) and isinstance(queue.get('id'), str)
+                   and queue['id'] for queue in data):
+            raise RuntimeError('Unexpected queue list. Expected objects with non-empty string IDs.')
+        return data
+
+    def _get_queue_jobs(self, queue_id):
+        data = self._get_allocation_api(
+            f'/queues/{queue_id}/jobs', f'Get jobs for queue {queue_id}', dict,
+        )
+        jobs = data.get('jobs')
+        if not isinstance(jobs, list) or not all(
+            isinstance(job, dict) and isinstance(job.get('id'), str) and job['id']
+            for job in jobs
+        ):
+            raise RuntimeError(
+                f'Unexpected jobs response for queue {queue_id}. '
+                "Expected 'jobs' array of objects with non-empty string IDs."
+            )
+        return jobs
+
+    @staticmethod
+    def _parse_allocation_job_datetime(value):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            return None
+
+    def _get_allocation_workspace_names(self, allocation_id):
+        """Best-effort display names; allocation detail access is optional for listing jobs."""
+        try:
+            allocation = self._get_allocation(allocation_id)
+        except (RuntimeError, requests.RequestException):
+            return {}
+        workspaces = allocation.get('workspace_access')
+        if not isinstance(workspaces, list):
+            return {}
+        return {
+            workspace['id']: workspace['name']
+            for workspace in workspaces
+            if isinstance(workspace, dict)
+            and isinstance(workspace.get('id'), str) and workspace['id']
+            and isinstance(workspace.get('name'), str) and workspace['name']
+        }
+
+    def allocation_queue(self, allocation_id, status_in=None, status_not_in=None, regions=None,
+                        queues=None, workspace_id=None, n_last=20, table_width=160,
+                        return_data=False, show_table=True):
+        """List jobs exposed by allocation queues across visible workspaces.
+
+        Allocation and queue selectors accept UUIDs or exact names. Filters are
+        applied locally, followed by a global newest-first limit. An omitted
+        region never inherits the profile region. This is not a job-history API.
+        """
+        if isinstance(n_last, bool) or not isinstance(n_last, int) or n_last < 1:
+            raise RuntimeError('Job limit must be a positive integer')
+        resolved_id, resolved_name = self._resolve_allocation_selector(allocation_id)
+        available_queues = self._get_allocation_queues(resolved_id)
+        selected_ids = set()
+        for selector in queues or []:
+            matches = [q for q in available_queues if selector in (q['id'], q.get('name'))]
+            if not matches:
+                raise RuntimeError(f'Queue {selector!r} was not found in allocation {allocation_id!r}.')
+            if len(matches) > 1:
+                raise RuntimeError(f'Queue {selector!r} is ambiguous; use its UUID.')
+            selected_ids.add(matches[0]['id'])
+
+        jobs_data = []
+        seen = set()
+        for queue in available_queues:
+            if queues and queue['id'] not in selected_ids:
+                continue
+            for job in self._get_queue_jobs(queue['id']):
+                identity = (job.get('workspace'), job['id'])
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if status_in and job.get('status') not in status_in:
+                    continue
+                if job.get('status') in (status_not_in or []):
+                    continue
+                if regions and job.get('region') not in regions:
+                    continue
+                if workspace_id is not None and job.get('workspace') != workspace_id:
+                    continue
+                created = self._parse_allocation_job_datetime(job.get('created_at'))
+                jobs_data.append({
+                    **job,
+                    'job_name': job.get('name') or '',
+                    'job_desc': job.get('description') or '',
+                    'created_dt': created.strftime('%Y-%m-%dT%H:%M:%SZ') if created else None,
+                    '_created_sort': created.timestamp() if created else float('-inf'),
+                    'api_job_id': job['id'],
+                    'allocation_id': resolved_id,
+                    'allocation_name': resolved_name or job.get('allocation_label'),
+                    'workspace_id': job.get('workspace'),
+                    'queue_id': queue['id'],
+                    'queue_name': queue.get('name') or job.get('queue_name'),
+                })
+        jobs_data.sort(key=lambda job: job['_created_sort'], reverse=True)
+        jobs_data = jobs_data[:n_last]
+        if jobs_data:
+            workspace_names = self._get_allocation_workspace_names(resolved_id)
+            for job in jobs_data:
+                job['workspace_name'] = workspace_names.get(job['workspace_id'])
+        rows = self._render_jobs_table(
+            jobs_data, f'Job Queue (Allocation: {resolved_name or resolved_id})',
+            'Created', lambda job: self._format_job_datetime(job.get('created_dt')),
+            lambda job: job.get('created_dt'), table_width=table_width,
+            show_table=show_table, allocation_context=True,
+        )
+        return rows if return_data else None
+
+    def _get_allocation_nodes(self, allocation_id):
+        data = self._get_allocation_api(
+            f'/allocations/{allocation_id}/nodes', f'Get nodes for allocation {allocation_id}', dict,
+        )
+        nodes = data.get('nodes')
+        if not isinstance(nodes, list) or not all(
+            isinstance(node, dict) and isinstance(node.get('name'), str) and node['name']
+            for node in nodes
+        ):
+            raise RuntimeError('Unexpected allocation nodes response. Expected nodes with non-empty names.')
+        return data
+
+    def _get_allocation_node_loads(self, allocation_id, node_names):
+        # The live API requires both allocation_id and node_names despite its
+        # description saying exactly one selector should be supplied.
+        data = self._get_allocation_api(
+            '/nodes/load', f'Get node loads for allocation {allocation_id}', dict,
+            params={'allocation_id': allocation_id, 'node_names': node_names},
+        )
+        loads = data.get('loads')
+        if not isinstance(loads, list):
+            raise RuntimeError("Unexpected node loads response. Expected a 'loads' array.")
+        for load in loads:
+            if not isinstance(load, dict) or not isinstance(load.get('node_name'), str):
+                raise RuntimeError('Unexpected node load. Expected a node_name.')
+            for field in ('jobs', 'notebooks'):
+                items = load.get(field)
+                if not isinstance(items, list) or not all(
+                    isinstance(item, dict) and isinstance(item.get('id'), str) and item['id']
+                    for item in items
+                ):
+                    raise RuntimeError(f'Unexpected node load. Expected {field} with non-empty IDs.')
+        if {load['node_name'] for load in loads} != set(node_names):
+            raise RuntimeError('Incomplete node loads response: returned nodes do not match allocation nodes.')
+        return loads
+
+    def allocation_workloads(self, allocation_id, types=None, status_in=None, status_not_in=None,
+                             n_last=None, table_width=160, return_data=False, show_table=True):
+        """Show jobs and notebooks assigned to allocation nodes, preserving their statuses.
+
+        All workloads are shown by default. This view does not include work waiting
+        for nodes and is not historical. Notebook workspace identity may be unknown;
+        its namespace is displayed when workspace identity is unavailable.
+        """
+        if types and any(kind not in ('job', 'notebook') for kind in types):
+            raise RuntimeError('Workload type must be job or notebook')
+        if n_last is not None and (isinstance(n_last, bool) or not isinstance(n_last, int) or n_last < 1):
+            raise RuntimeError('Workload limit must be a positive integer')
+        resolved_id, resolved_name = self._resolve_allocation_selector(allocation_id)
+        allocation = self._get_allocation_nodes(resolved_id)
+        node_names = list(dict.fromkeys(node['name'] for node in allocation['nodes']))
+        loads = self._get_allocation_node_loads(resolved_id, node_names) if node_names else []
+        grouped = {}
+        for load in loads:
+            for kind, field in (('job', 'jobs'), ('notebook', 'notebooks')):
+                if types and kind not in types:
+                    continue
+                for item in load[field]:
+                    # A workload can occur on several nodes. Its declared GPU
+                    # count is a workload total, not a value to sum per node.
+                    key = (kind, item.get('workspace') or item.get('namespace'), item['id'])
+                    if key in grouped:
+                        if load['node_name'] not in grouped[key]['nodes']:
+                            grouped[key]['nodes'].append(load['node_name'])
+                        continue
+                    limits = item.get('limits') or {}
+                    raw_gpus = item.get('gpu_count') if kind == 'job' else limits.get('gpu')
+                    try:
+                        gpu_count = int(raw_gpus) if raw_gpus is not None else None
+                    except (ValueError, TypeError):
+                        gpu_count = None
+                    grouped[key] = {
+                        'type': kind, 'id': item['id'], 'name': item.get('name') or item['id'],
+                        'status': item.get('status'), 'gpu_count': gpu_count,
+                        'workspace_id': item.get('workspace'), 'workspace_name': None,
+                        'namespace': item.get('namespace'), 'nodes': [load['node_name']],
+                        'allocation_id': resolved_id,
+                        'allocation_name': resolved_name or allocation.get('name'),
+                        'region': item.get('region'), 'created_at': item.get('created_at'),
+                        'description': item.get('description'), 'instance_type': item.get('instance_type'),
+                        'user_id': item.get('user_id'), 'user_email': item.get('user_email'),
+                    }
+        include = {value.casefold() for value in status_in or []}
+        exclude = {value.casefold() for value in status_not_in or []}
+        rows = [row for row in grouped.values()
+                if (not include or str(row['status']).casefold() in include)
+                and str(row['status']).casefold() not in exclude]
+        def created_order(row):
+            parsed = self._parse_allocation_job_datetime(row['created_at'])
+            return parsed.timestamp() if parsed else float('-inf')
+        rows.sort(key=created_order, reverse=True)
+        if n_last is not None:
+            rows = rows[:n_last]
+        if any(row['workspace_id'] for row in rows):
+            workspace_names = self._get_allocation_workspace_names(resolved_id)
+            for row in rows:
+                row['workspace_name'] = workspace_names.get(row['workspace_id'])
+        for row in rows:
+            row['nodes'].sort()
+        if show_table:
+            label = resolved_name or allocation.get('name') or resolved_id
+            table = Table(title=f'Workloads assigned to nodes (Allocation: {label})')
+            table.add_column('Created', style='cyan', min_width=19, overflow='fold')
+            table.add_column('Type', style='cyan')
+            table.add_column('Name', style='magenta', overflow='fold')
+            table.add_column('Status', justify='center')
+            table.add_column('GPUs', justify='right')
+            table.add_column('Description', overflow='fold')
+            table.add_column('Workspace', overflow='fold')
+            table.add_column('Nodes', overflow='fold')
+            for row in rows:
+                workspace = row['workspace_name'] or row['workspace_id']
+                if not workspace and row['namespace']:
+                    workspace = row['namespace'] if row['type'] == 'notebook' else f"namespace: {row['namespace']}"
+                status = str(row['status'] or 'Unknown')
+                created = self._parse_allocation_job_datetime(row['created_at'])
+                created_display = self._format_job_datetime(
+                    created.strftime('%Y-%m-%dT%H:%M:%SZ') if created else None,
+                )
+                table.add_row(
+                    Text(created_display),
+                    Text(row['type']), Text(row['name']), Text(status, style=self.STATUS_STYLES.get(status, 'white')),
+                    str(row['gpu_count']) if row['gpu_count'] is not None else '—',
+                    Text(row['description'] or ''),
+                    Text(workspace or 'Unknown'), Text(', '.join(row['nodes'])),
+                )
+            Console(width=table_width).print(table)
+        return rows if return_data else None
 
     def _resolve_allocation_selector(self, allocation_id):
         """Resolve an allocation UUID or exact allocation name to its UUID and optional name."""
@@ -1899,7 +2155,7 @@ class CloudRuAPIClient:
     def _job_finished_dt_raw(job):
         return job.get('completed_dt') or job.get('updated_dt') or job.get('created_dt')
 
-    def _normalize_job_row(self, job, primary_time_raw, primary_time_display):
+    def _normalize_job_row(self, job, primary_time_raw, primary_time_display, allocation_context=False):
         created_dt_raw = job.get('created_dt')
         finished_dt_raw = self._job_finished_dt_raw(job)
         gpu_count_raw = job.get('gpu_count', 0)
@@ -1907,7 +2163,7 @@ class CloudRuAPIClient:
             gpu_count = int(gpu_count_raw)
         except (TypeError, ValueError):
             gpu_count = 0
-        return {
+        row = {
             'time': primary_time_display,
             'time_raw': primary_time_raw,
             'time_display': primary_time_display,
@@ -1929,18 +2185,35 @@ class CloudRuAPIClient:
             'duration_display': self._format_job_duration(job.get('duration', '')),
             'duration': self._format_job_duration(job.get('duration', '')),
         }
+        if allocation_context:
+            row.update({key: job.get(key) for key in (
+                'api_job_id', 'allocation_id', 'allocation_name', 'workspace_id', 'workspace_name',
+                'queue_id', 'queue_name', 'namespace', 'instance_type', 'user_id',
+                'user_email', 'created_at',
+            )})
+            row.update(
+                finished_dt_raw=None, finished_dt_display='Unknown',
+                cost_raw=None, cost_display='—', cost='—',
+                duration_raw=None, duration_display='—', duration='—',
+            )
+        return row
 
     def _render_jobs_table(self, jobs_data, table_title, time_column, time_getter, time_raw_getter,
-                           table_width=160, show_table=True):
+                           table_width=160, show_table=True, allocation_context=False):
         table = Table(title=table_title)
-        table.add_column(time_column, justify='left', style='cyan')
+        table.add_column(time_column, justify='left', style='cyan',
+                         overflow='fold' if allocation_context else 'ellipsis',
+                         min_width=19 if allocation_context else None)
         table.add_column('Job ID', no_wrap=True, justify='left', style='magenta')
         table.add_column('Status', justify='center', style='green')
         table.add_column('Region', justify='center', style='yellow')
         table.add_column('GPUs', justify='center')
         table.add_column('Description', overflow='fold')
-        table.add_column('Cost', justify='right')
-        table.add_column('Duration', justify='right')
+        if allocation_context:
+            table.add_column('Workspace', overflow='fold')
+        else:
+            table.add_column('Cost', justify='right')
+            table.add_column('Duration', justify='right')
 
         rendered_rows = []
         for job in jobs_data:
@@ -1948,7 +2221,8 @@ class CloudRuAPIClient:
             status_style = self.STATUS_STYLES.get(status, 'white')
             time_raw = time_raw_getter(job)
             time_value = time_getter(job)
-            row = self._normalize_job_row(job, primary_time_raw=time_raw, primary_time_display=time_value)
+            row = self._normalize_job_row(job, primary_time_raw=time_raw, primary_time_display=time_value,
+                                          allocation_context=allocation_context)
             rendered_rows.append(row)
 
             if show_table:
@@ -1959,8 +2233,8 @@ class CloudRuAPIClient:
                     row['region'],
                     row['gpus'],
                     row['description'],
-                    row['cost'],
-                    row['duration'],
+                    *([str(row['workspace_name'] or row['workspace_id'] or '')]
+                      if allocation_context else [row['cost'], row['duration']]),
                 )
 
         if show_table:
