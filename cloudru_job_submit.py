@@ -11,9 +11,9 @@ import uuid
 
 import cloudru_config
 from cloudru_snapshot import DEFAULT_MAX_BYTES, create_snapshot, inspect_snapshot, prepare_snapshot, snapshot_filename
-from cloudru_storage import _endpoint, _prefix, resolve_upload_config, upload_snapshot, validate_snapshot_uri
+from cloudru_storage import _endpoint, _prefix, resolve_upload_config, upload_snapshot, validate_snapshot_uri, output_destination
 
-GENERATED_ENV = {"CLOUDRU_JOB_DIR", "CLOUDRU_SOURCE_DIR", "CLOUDRU_SNAPSHOT_URI"}
+GENERATED_ENV = {"CLOUDRU_JOB_DIR_NAME", "CLOUDRU_JOB_DIR", "CLOUDRU_SOURCE_DIR", "CLOUDRU_SNAPSHOT_URI"}
 CAPTURE_KEYS = {"output_dir", "use_gitignore", "exclude", "exclude_from", "max_bytes"}
 LOCAL_MAP = {"aws_cli": "aws_cli", "profile": "aws_profile", "config_file": "aws_config_file",
              "credentials_file": "aws_credentials_file"}
@@ -43,9 +43,9 @@ def _local_path(value, base):
     return str(path if path.is_absolute() else base / path)
 
 
-def _remote_path(value, label):
+def _remote_path(value, label, *, allow_dollar=False):
     if (not _text(value) or not value.startswith("/") or value.startswith("//")
-            or any(p in (".", "..") for p in value.split("/")) or "$" in value or "\\" in value):
+            or any(p in (".", "..") for p in value.split("/")) or ("$" in value and not allow_dollar) or "\\" in value):
         raise ValueError(f"{label} must be an absolute remote path without variables or traversal")
     return value
 
@@ -111,7 +111,7 @@ def snapshot_job_dir(uri, jobs_root, *, dry_run=False):
 def validate_managed_schema(document, job, setup, allowed_job_fields):
     """Aggregate schema/type errors before performing capture or authentication."""
     errors = []
-    _unknown(document, {"job", "setup", "snapshot", "s3"}, "top-level", errors)
+    _unknown(document, {"job", "setup", "snapshot", "s3", "outputs"}, "top-level", errors)
     _unknown(job, allowed_job_fields, "job", errors)
     snapshot = _object(document.get("snapshot"), "snapshot", errors)
     _unknown(snapshot, {"source", "archive", "uri"} | CAPTURE_KEYS, "snapshot", errors)
@@ -130,8 +130,8 @@ def validate_managed_schema(document, job, setup, allowed_job_fields):
     if "exclude" in snapshot and (not isinstance(snapshot["exclude"], list) or not all(_text(x) for x in snapshot["exclude"])):
         errors.append("snapshot.exclude must be a list of nonempty strings")
     s3 = _object(document.get("s3", {}), "s3", errors)
-    _unknown(s3, {"endpoint_url", "snapshot_prefix", "local"}, "s3", errors)
-    for key in ("endpoint_url", "snapshot_prefix"):
+    _unknown(s3, {"endpoint_url", "snapshot_prefix", "local", "collect_outputs_to"}, "s3", errors)
+    for key in ("endpoint_url", "snapshot_prefix", "collect_outputs_to"):
         if key in s3 and not _text(s3[key]):
             errors.append(f"s3.{key} must be a nonempty string")
     local = _object(s3.get("local", {}), "s3.local", errors)
@@ -199,6 +199,33 @@ def resolve_storage_values(document, base, profile_values, overrides):
     return values
 
 
+def resolve_collection(outputs, destination, env):
+    from cloudru_job_runtime import expand_variables
+
+    if not isinstance(outputs, list) or any(not _text(path) for path in outputs):
+        raise ValueError("outputs must be a list of nonempty directory paths")
+    if not outputs:
+        return {}
+    if not _text(destination):
+        raise ValueError("outputs requires s3.collect_outputs_to or --collect-outputs-to")
+    destination = expand_variables(destination, env, "s3.collect_outputs_to")
+    try:
+        _prefix(destination)
+    except ValueError:
+        raise ValueError("s3.collect_outputs_to must resolve to a valid S3 destination") from None
+    paths, names = [], set()
+    for index, path in enumerate(outputs):
+        label = f"outputs[{index}]"
+        path = _remote_path(expand_variables(path, env, label), label, allow_dollar=True).rstrip("/")
+        name = path.rsplit("/", 1)[-1]
+        if not name or name in names:
+            raise ValueError("outputs requires non-root directories with distinct basenames")
+        names.add(name)
+        output_destination(path, destination)
+        paths.append(path)
+    return {"outputs": paths, "collect_outputs_to": destination}
+
+
 @dataclass
 class ManagedSubmission:
     job: dict
@@ -208,17 +235,21 @@ class ManagedSubmission:
     storage: object = None
     capture_plan: object = None
     archive: dict | None = None
+    outputs: list | None = None
+    collect_outputs_to: str | None = None
 
     def runtime_config(self, uri, digest=None, *, dry_run=False):
         from cloudru_job_runtime import validate_setup
         env = dict(self.job["env_variables"])
         directory = snapshot_job_dir(uri, env["CLOUDRU_JOBS_ROOT"], dry_run=dry_run)
-        env.update(CLOUDRU_JOB_DIR=directory, CLOUDRU_SOURCE_DIR=directory + "/source", CLOUDRU_SNAPSHOT_URI=uri)
+        env.update(CLOUDRU_JOB_DIR_NAME=directory.rsplit("/", 1)[-1], CLOUDRU_JOB_DIR=directory,
+                   CLOUDRU_SOURCE_DIR=directory + "/source", CLOUDRU_SNAPSHOT_URI=uri)
         snapshot = {"uri": uri}
         if digest is not None:
             snapshot["source_digest"] = digest
         return {"job": {**self.job, "env_variables": env}, "setup": validate_setup(self.setup, env),
-                "snapshot": snapshot, "endpoint_url": self.endpoint_url}
+                "snapshot": snapshot, "endpoint_url": self.endpoint_url,
+                **resolve_collection(self.outputs or [], self.collect_outputs_to, env)}
 
     def preview(self):
         if "uri" in self.snapshot:
@@ -228,6 +259,9 @@ class ManagedSubmission:
             uri = self.storage.s3_snapshot_prefix + "/" + name
         result = self.runtime_config(uri, self.archive.get("source_digest") if self.archive else None, dry_run=True)
         result["dry_run"] = True
+        if result.get("outputs"):
+            result["collection"] = [{"source": path, "destination": output_destination(path, result["collect_outputs_to"])}
+                                    for path in result["outputs"]]
         if self.capture_plan:
             result["capture"] = self.capture_plan.public_dict()
             result["snapshot"]["source_digest"] = "<computed during capture>"
@@ -257,7 +291,7 @@ class ManagedSubmission:
 
 def prepare_snapshot_submission(document, job, setup, *, base, profile_values,
                                 storage_overrides, allowed_job_fields, no_bootstrap=False,
-                                use_gitignore=None):
+                                use_gitignore=None, collect_outputs_to=None):
     from cloudru_job_runtime import validate_setup
     job, setup = dict(job), dict(setup)
     errors = validate_managed_schema(document, job, setup, allowed_job_fields)
@@ -280,11 +314,21 @@ def prepare_snapshot_submission(document, job, setup, *, base, profile_values,
             value is not None for key, value in storage_overrides.items() if key != "s3_endpoint_url"):
         errors.append("Local upload CLI options are unused with snapshot.uri; use --env for remote AWS settings")
     # Resolve structured setup against placeholder generated paths before any I/O.
-    placeholder_env = {**env, "CLOUDRU_JOB_DIR": "/__cloudru_pending__",
+    placeholder_env = {**env, "CLOUDRU_JOB_DIR_NAME": "__cloudru_pending__",
+                       "CLOUDRU_JOB_DIR": "/__cloudru_pending__",
                        "CLOUDRU_SOURCE_DIR": "/__cloudru_pending__/source",
                        "CLOUDRU_SNAPSHOT_URI": "s3://placeholder/__snapshot_name_pending__.tar.gz"}
     try:
         validate_setup(setup, placeholder_env)
+    except (ValueError, RuntimeError, TypeError) as exc:
+        errors.append(str(exc))
+    s3 = document.get("s3", {})
+    destination = collect_outputs_to
+    if destination is None:
+        destination = s3.get("collect_outputs_to") if isinstance(s3, dict) else None
+    outputs = document.get("outputs", [])
+    try:
+        resolve_collection(outputs, destination, placeholder_env)
     except (ValueError, RuntimeError, TypeError) as exc:
         errors.append(str(exc))
     values = resolve_storage_values(document, base, profile_values, storage_overrides)
@@ -318,7 +362,8 @@ def prepare_snapshot_submission(document, job, setup, *, base, profile_values,
     else:
         storage = resolve_upload_config(values)
     effective_job = {"job_type": "binary", "n_workers": 1, "processes_per_worker": 1, **job, "env_variables": env}
-    managed = ManagedSubmission(effective_job, setup, snapshot, endpoint, storage)
+    managed = ManagedSubmission(effective_job, setup, snapshot, endpoint, storage,
+                                outputs=outputs, collect_outputs_to=destination)
     if "source" in snapshot:
         protected = [cloudru_config.CONFIG_PATH, cloudru_config.CREDENTIALS_PATH, cloudru_config.TOKEN_CACHE_PATH,
                      *storage.protected_paths]

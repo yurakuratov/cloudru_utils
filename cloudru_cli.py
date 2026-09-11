@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import getpass
+from importlib.metadata import version
 import json
 import os
 from pathlib import Path
@@ -576,11 +577,21 @@ def _should_use_bootstrap(setup_cfg: dict) -> bool:
     ])
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"cloudru {version('cloudru-utils')}")
+        raise typer.Exit()
+
+
 @app.callback()
 def root_callback(
     ctx: typer.Context,
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+    show_version: bool = typer.Option(
+        False, "--version", "-v", callback=_version_callback, is_eager=True,
+        help="Show the installed version and exit",
+    ),
 ) -> None:
     ctx.obj = {"profile": profile, "debug": debug}
 
@@ -1429,6 +1440,16 @@ def cmd_jobs_kill(
         _fail(exc, debug_mode)
 
 
+def _check_submit_response(response) -> None:
+    job_id = response.get("job_name") if isinstance(response, dict) else None
+    if isinstance(job_id, str) and job_id.strip():
+        return
+    error_message = response.get("error_message") if isinstance(response, dict) else None
+    if isinstance(error_message, str) and error_message.strip():
+        raise RuntimeError(error_message)
+    raise RuntimeError("API response did not include an accepted job_name; submission is unconfirmed and will not be retried")
+
+
 @jobs_app.command("submit", help="Submit job from YAML with CLI overrides")
 def cmd_jobs_submit(
     ctx: typer.Context,
@@ -1451,6 +1472,7 @@ def cmd_jobs_submit(
     pre_command: Optional[list[str]] = typer.Option(None, "--pre-command", help="Repeatable setup command"),
     no_bootstrap: bool = typer.Option(False, "--no-bootstrap", help="Submit raw script without setup wrapper"),
     snapshot_s3_prefix: Optional[str] = typer.Option(None, "--snapshot-s3-prefix"),
+    collect_outputs_to: Optional[str] = typer.Option(None, "--collect-outputs-to", help="S3 destination template for configured outputs"),
     s3_endpoint_url: Optional[str] = typer.Option(None, "--s3-endpoint-url"),
     aws_profile: Optional[str] = typer.Option(None, "--aws-profile"),
     aws_cli: Optional[str] = typer.Option(None, "--aws-cli"),
@@ -1471,6 +1493,8 @@ def cmd_jobs_submit(
         document = _load_job_document(file)
         setup_cfg, raw_job_cfg = _job_sections(document)
         is_managed = "snapshot" in document
+        if not is_managed and ("outputs" in document or collect_outputs_to is not None):
+            raise RuntimeError("Output collection requires a snapshot section in YAML")
         if is_managed:
             cfg = load_submit_profile(selected_profile)
         else:
@@ -1532,7 +1556,7 @@ def cmd_jobs_submit(
                 document, submit_kwargs, setup_effective, base=Path.cwd(),
                 profile_values=cfg, storage_overrides=storage_overrides,
                 allowed_job_fields=SUBMIT_JOB_ALLOWED_FIELDS, no_bootstrap=no_bootstrap,
-                use_gitignore=use_gitignore)
+                use_gitignore=use_gitignore, collect_outputs_to=collect_outputs_to)
             if dry_run:
                 preview = managed.preview()
                 typer.echo(json.dumps(preview, ensure_ascii=True, indent=2) if as_json else yaml.safe_dump(preview, sort_keys=False))
@@ -1550,6 +1574,8 @@ def cmd_jobs_submit(
                 "job_dir": runtime_config["job"]["env_variables"]["CLOUDRU_JOB_DIR"],
                 "response": response,
             }
+            if runtime_config.get("outputs"):
+                result["collect_outputs_to"] = runtime_config["collect_outputs_to"]
             if managed.archive:
                 result["archive_path"] = managed.archive["archive_path"]
             if as_json:
@@ -1558,8 +1584,9 @@ def cmd_jobs_submit(
                 typer.echo(f"Job ID: {result['job_id'] or 'not returned by API'}")
                 typer.echo(f"Job directory: {result['job_dir']}")
                 typer.echo(f"Snapshot URI: {result['snapshot_uri']}")
-            if accepted_id is None:
-                raise RuntimeError("API response did not include an accepted job_name; submission is unconfirmed and will not be retried")
+                if "collect_outputs_to" in result:
+                    typer.echo(f"Collect outputs to: {result['collect_outputs_to']}")
+            _check_submit_response(response)
             return
 
         required = ["script", "base_image", "instance_type", "region"]
@@ -1585,6 +1612,8 @@ def cmd_jobs_submit(
         result = client.submit_job(**submit_kwargs)
         if as_json:
             typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        _check_submit_response(result)
+        if as_json:
             return
 
         console = Console()

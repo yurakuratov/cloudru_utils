@@ -55,20 +55,24 @@ def validate_setup(setup: dict, env: dict) -> dict:
     result["pre_command"] = [v for v in commands if v.strip()]
     result.setdefault("workdir", "${CLOUDRU_SOURCE_DIR}")
 
+    for key in ("workdir", "conda_env"):
+        if key in result:
+            result[key] = expand_variables(result[key], env, f"setup.{key}")
+    return result
+
+
+def expand_variables(value: str, env: dict, label: str) -> str:
+    """Expand configured variables once, without interpreting shell expressions."""
+    if "$" in _PATH_VARIABLE.sub("", value):
+        raise ValueError(f"{label} supports only $NAME and ${{NAME}} substitution")
+
     def expand(match):
         name = match.group(1) or match.group(2)
         if name not in env:
-            raise ValueError(f"Unknown environment variable in setup path: {name}")
+            raise ValueError(f"Unknown environment variable in {label}: {name}")
         return str(env[name])
 
-    for key in ("workdir", "conda_env"):
-        if key in result:
-            value = result[key]
-            # Structured paths are not shell programs; reject unsupported syntax.
-            if "$" in _PATH_VARIABLE.sub("", value):
-                raise ValueError(f"setup.{key} supports only $NAME and ${{NAME}} substitution")
-            result[key] = _PATH_VARIABLE.sub(expand, value)
-    return result
+    return _PATH_VARIABLE.sub(expand, value)
 
 
 def _now() -> str:
@@ -178,15 +182,42 @@ def _experiment_script(setup: dict, main: str, python: str, helper: Path, contro
     return "set -e\n" + "\n".join(steps) + "\n" + main + "\n"
 
 
+def _collect_outputs(control: Path, collection: dict, destination: str, storage) -> bool:
+    from cloudru_storage import upload_directory
+
+    collection["status"] = "running"
+    for item in collection["outputs"]:
+        item["status"] = "uploading"
+        _set_phase(control, "collection", collection=collection)
+        print(f"cloudru: collecting {item['source']} -> {item['destination']}", file=sys.stderr)
+        try:
+            uploaded = upload_directory(item["source"], destination, storage)
+            item["status"] = "uploaded" if uploaded else "skipped"
+            if not uploaded:
+                item["reason"] = "directory is missing"
+                print(f"cloudru: warning: output directory is missing: {item['source']}", file=sys.stderr)
+        except _JobInterrupted:
+            item["status"] = "interrupted"
+            raise
+        except (OSError, ValueError, RuntimeError) as exc:
+            item.update(status="failed", error=type(exc).__name__,
+                        reason=type(exc).__name__ if isinstance(exc, OSError) else str(exc))
+            print(f"cloudru: output collection failed for {item['source']}: {item['reason']}", file=sys.stderr)
+        _set_phase(control, "collection", collection=collection)
+    failed = any(item["status"] == "failed" for item in collection["outputs"])
+    collection["status"] = "failed" if failed else "succeeded"
+    return failed
+
+
 def run_job(config: dict, aws_cli: str, bash_executable: str, config_yaml: str) -> int:
     """Run on the job machine; stdout/stderr remain attached to the platform."""
     from cloudru_snapshot import extract_snapshot
-    from cloudru_storage import resolve_download_config, download_snapshot
+    from cloudru_storage import resolve_download_config, download_snapshot, output_destination
 
     # Keep the activated PATH and initialization exports. Reapply only managed
     # context so activation hooks cannot redirect transfers or job directories.
     configured = config["job"]["env_variables"]
-    for key in ("HOME", "CLOUDRU_JOBS_ROOT", "CLOUDRU_JOB_DIR", "CLOUDRU_SOURCE_DIR",
+    for key in ("HOME", "CLOUDRU_JOBS_ROOT", "CLOUDRU_JOB_DIR_NAME", "CLOUDRU_JOB_DIR", "CLOUDRU_SOURCE_DIR",
                 "CLOUDRU_SNAPSHOT_URI", "AWS_PROFILE", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"):
         os.environ[key] = configured[key]
     os.environ["CLOUDRU_AWS_CLI"] = aws_cli
@@ -199,6 +230,12 @@ def run_job(config: dict, aws_cli: str, bash_executable: str, config_yaml: str) 
         return 2
     control = directory / ".cloudru"
     child = None
+    experiment_code = None
+    collection = None
+    if config.get("outputs"):
+        collection = {"status": "pending", "outputs": [
+            {"source": path, "destination": output_destination(path, config["collect_outputs_to"]), "status": "pending"}
+            for path in config["outputs"]]}
     received_signal = None
     previous_handlers = {}
 
@@ -221,7 +258,8 @@ def run_job(config: dict, aws_cli: str, bash_executable: str, config_yaml: str) 
         return 2
     try:
         control.mkdir(mode=0o700)
-        _set_phase(control, "startup", complete=False, exit_code=None)
+        _set_phase(control, "startup", complete=False, exit_code=None,
+                   **({"collection": collection} if collection else {}))
         _write_text(control / "config.yaml", config_yaml)
         _best_effort(control, "environment.startup.json", lambda: dict(env))
         for signum in (signal.SIGTERM, signal.SIGINT):
@@ -251,29 +289,53 @@ def run_job(config: dict, aws_cli: str, bash_executable: str, config_yaml: str) 
         script = _experiment_script(config["setup"], config["job"]["script"], python, helper, control)
         child = subprocess.Popen([bash_executable, "-c", script], start_new_session=True)
         code = child.wait()
+        child = None  # Signals must now interrupt AWS collection, not the completed shell.
         if received_signal:
             code = 128 + received_signal
         elif code < 0:
             code = 128 - code
         try:
             status = json.loads((control / "status.json").read_text())
-            if status["phase"] != "experiment" and code == 0:
-                # An early `exit 0`/`exec` in setup must not report an experiment
-                # that never started as successfully completed.
-                code = 2
-            _set_phase(control, status["phase"], complete=True, finished_at=_now(), exit_code=code)
+            phase = status["phase"]
+        except (OSError, ValueError, KeyError):
+            print("cloudru: could not read final status; preserving command exit code", file=sys.stderr)
+            return code or (1 if collection else 0)
+        if phase != "experiment" and code == 0:
+            # An early `exit 0`/`exec` in setup must not report successful training.
+            code = 2
+        if phase == "experiment":
+            experiment_code = code
+        if collection:
+            if experiment_code is None or received_signal:
+                collection["status"] = "interrupted" if received_signal else "skipped"
+                for item in collection["outputs"]:
+                    item.update(status="skipped", reason="job cancelled" if received_signal else "experiment did not start")
+            else:
+                phase = "collection"
+                _set_phase(control, phase, experiment_exit_code=experiment_code, collection=collection)
+                failed = _collect_outputs(control, collection, config["collect_outputs_to"], storage)
+                code = experiment_code or int(failed)
+        try:
+            _set_phase(control, phase, complete=True, finished_at=_now(), exit_code=code,
+                       **({"experiment_exit_code": experiment_code, "collection": collection} if collection else {}))
         except (OSError, ValueError, KeyError):
             print("cloudru: could not save final status; preserving command exit code", file=sys.stderr)
         return code
     except Exception as exc:
-        code = 128 + received_signal if received_signal else 2
+        code = 128 + received_signal if received_signal else (experiment_code or (1 if experiment_code is not None else 2))
+        if collection:
+            collection["status"] = "interrupted" if received_signal else ("failed" if experiment_code is not None else "skipped")
+            for item in collection["outputs"]:
+                if item["status"] in ("pending", "uploading"):
+                    item.update(status="skipped", reason="job cancelled" if received_signal else "collection did not complete")
         # Exception messages may contain credentials, commands, or environment values.
         print(f"cloudru: job bootstrap failed ({type(exc).__name__}); see .cloudru/status.json", file=sys.stderr)
         if control.is_dir():
             try:
                 status = json.loads((control / "status.json").read_text())
                 _set_phase(control, status["phase"], complete=True, finished_at=_now(),
-                           exit_code=code, error=type(exc).__name__, message=str(exc))
+                           exit_code=code, error=type(exc).__name__, message=str(exc),
+                           **({"experiment_exit_code": experiment_code, "collection": collection} if collection else {}))
             except (OSError, ValueError):
                 pass
         return code

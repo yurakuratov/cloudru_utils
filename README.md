@@ -16,6 +16,8 @@ At a glance:
 pip install -e .
 ```
 
+Check the installed version with `cloudru --version` (or `cloudru -v`).
+
 ## Credentials and workspace
 
 The API credentials below are needed for Cloud.ru jobs/resources commands.
@@ -348,18 +350,13 @@ can also capture source or reuse an existing snapshot, as described below.
 
 Add `snapshot` to job YAML to capture or reuse a source package, deliver it through
 S3, and extract it before remote setup and execution. Start with the
-[runnable smoke-job template](examples/snapshot-job.yaml), replacing its bucket,
+[runnable smoke-job template](examples/snapshot-job-example.yaml), replacing its bucket,
 AWS profiles, remote HOME, image, and instance type for your workspace:
 
 ```bash
 # Validate and preview without authentication, writes, network, or submission.
-cloudru jobs submit -f examples/snapshot-job.yaml --dry-run
-
-# Capture, upload, and submit; local AWS overrides do not change remote AWS settings.
-cloudru jobs submit -f examples/snapshot-job.yaml \
-  --snapshot-s3-prefix s3://my-bucket/my-user/snapshots \
-  --s3-endpoint-url https://s3.cloud.ru --aws-profile research \
-  --env HOME=/home/jovyan/my-user --env AWS_PROFILE=research
+# Update snapshot-job-example.yaml with corrected paths and aws setting.
+cloudru jobs submit -f examples/snapshot-job-example.yaml --dry-run
 ```
 
 Choose exactly one snapshot mode:
@@ -376,8 +373,8 @@ Source mode accepts `output_dir` (default `./snapshots`), `use_gitignore` (defau
 `--no-use-gitignore` overrides YAML only when explicitly supplied. Capture options
 do not apply to archive/URI reuse.
 
-`s3` accepts `endpoint_url`, `snapshot_prefix`, and `local` settings `aws_cli`,
-`profile`, `config_file`, and `credentials_file`. Shared storage and local AWS
+For snapshot transfers, `s3` accepts `endpoint_url`, `snapshot_prefix`, and `local` settings `aws_cli`,
+`profile`, `config_file`, and `credentials_file`. Snapshot storage and local AWS
 settings resolve as CLI > YAML > selected Cloud.ru profile > defaults. The
 profile keys are the same as for standalone snapshots above. Local overrides are
 `--snapshot-s3-prefix`, `--s3-endpoint-url`, `--aws-cli`, `--aws-profile`,
@@ -408,15 +405,16 @@ environment and resolves AWS to an absolute path, then runs `setup.shell_init`
 and activates `setup.conda_env`. It uses `python` (or `python3` if `python` is absent)
 from the resulting PATH and requires version 3.9+.
 
-Only three generated variables are reserved: `CLOUDRU_JOB_DIR`,
-`CLOUDRU_SOURCE_DIR`, and `CLOUDRU_SNAPSHOT_URI`. The job directory is
-`<CLOUDRU_JOBS_ROOT>/<sanitized-snapshot-basename>-<4hex>`. Source
+Four generated variables are reserved: `CLOUDRU_JOB_DIR_NAME`, `CLOUDRU_JOB_DIR`,
+`CLOUDRU_SOURCE_DIR`, and `CLOUDRU_SNAPSHOT_URI`. `CLOUDRU_JOB_DIR_NAME` is
+`<sanitized-snapshot-basename>-<4hex>`; the job directory is
+`<CLOUDRU_JOBS_ROOT>/<CLOUDRU_JOB_DIR_NAME>`. Source
 extracts into `<CLOUDRU_JOB_DIR>/source`. The bootstrap refuses an existing job
 directory.
 
 Execution order is remote context → resolve AWS → shell initialization
 → conda activation → download/validate/extract → `setup.pre_command` → optional HF auth check → working-directory
-change → prepared diagnostics → `job.script`. The default working directory is
+change → prepared diagnostics → `job.script` → optional output collection. The default working directory is
 `${CLOUDRU_SOURCE_DIR}`. Pre-commands run before that change, so use
 `$CLOUDRU_SOURCE_DIR` when preparing source paths. Scripts choose and create their
 own output directories. Initialization and activation run once and must work before
@@ -438,7 +436,35 @@ Managed execution supports one binary job with one worker and one process per
 worker, without automatic retries. No local job mapping or submission receipt is created. Managed
 snapshots require the bootstrap; `--no-bootstrap` is unsupported for them. Non-snapshot
 jobs retain their own setup and submission behavior. See the
-[snapshot job example](examples/snapshot-job.yaml) for configuration.
+[snapshot job example](examples/snapshot-job-example.yaml) for configuration.
+
+### Collect outputs to S3
+
+Snapshot jobs can copy selected directories to S3 after the experiment exits:
+
+```yaml
+snapshot:
+  source: .
+s3:
+  # Keep your existing endpoint and snapshot upload settings.
+  collect_outputs_to: 's3://my-bucket/my-user/outputs/${CLOUDRU_JOB_DIR_NAME}'
+outputs:
+  - '${CLOUDRU_SOURCE_DIR}/runs'
+  - '${CLOUDRU_JOB_DIR}/checkpoints'
+# Keep your existing job and setup sections.
+```
+
+Set the S3 destination in `s3.collect_outputs_to` and list absolute directory paths
+under `outputs`. Job environment variables work in both fields. The example uploads
+to `runs/` and `checkpoints/` beneath a separate S3 folder for each job. Directory
+names must be distinct; symlinks are followed.
+
+Uploads run after training finishes, even if training fails. Missing directories
+are skipped, and files remain on NFS. Submission returns immediately; the job stays
+allocated until uploads finish. Remove `outputs` section from yaml to disable collection.
+
+Use `--dry-run` to preview source and destination paths, or `--collect-outputs-to`
+to override the destination.
 
 
 ## Telegram Bot (local run)
@@ -592,7 +618,7 @@ cloud_client.kill_job(job_id, region="SR006")
 ## Example script and job yaml:
 - `examples/example.sh`
 - `examples/job.yaml`
-- [Managed snapshot job](examples/snapshot-job.yaml)
+- [Managed snapshot job](examples/snapshot-job-example.yaml)
 
 ## Example notebook (a bit outdated)
 

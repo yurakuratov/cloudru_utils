@@ -13,7 +13,7 @@ import configparser
 from dataclasses import dataclass
 import ipaddress
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import signal
@@ -390,6 +390,37 @@ def upload_snapshot(snapshot: dict, config: UploadConfig) -> dict:
         raise _failure("cp", result)
     print("Snapshot archive uploaded.", file=sys.stderr)
     return {**snapshot, "s3_uri": uri}
+
+
+def output_destination(source: str, destination: str) -> str:
+    """Keep the selected directory's name, even when it points elsewhere."""
+    prefix = _prefix(destination)
+    name = PurePosixPath(source).name
+    if not name or name in (".", ".."):
+        raise ValueError("Output source must name a directory")
+    key = (urlsplit(prefix).path + "/" + name + "/")[1:]
+    if len(key.encode("utf-8")) > 1024:
+        raise ValueError("Output destination exceeds the S3 key length limit")
+    return prefix + "/" + name + "/"
+
+
+def upload_directory(source: str, destination: str, config: UploadConfig) -> bool:
+    """Copy a directory, following symlinks; return False when it is missing."""
+    path = Path(source)
+    uri = output_destination(source, destination)
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(mode):
+        raise ValueError("Output source is not a directory")
+    config = resolve_upload_config(config.public_dict())
+    result = _run(config, _aws_environment(config), "cp",
+                  [str(path), uri, "--recursive", "--follow-symlinks", "--only-show-errors"],
+                  retained="NFS files and partial uploads retained", managed=True)
+    if result.returncode:
+        raise _failure("cp", result, retained="NFS files and partial uploads retained")
+    return True
 
 
 def download_snapshot(uri: str, destination: str, config: UploadConfig) -> None:
