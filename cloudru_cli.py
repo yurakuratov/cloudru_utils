@@ -967,7 +967,7 @@ def cmd_instance_types(
 @resources_app.command("available", help="Show currently available resources")
 def cmd_available_resources(
     ctx: typer.Context,
-    allocation_id: Optional[str] = typer.Option(None, "--allocation-id"),
+    allocation_id: Optional[str] = typer.Option(None, "--allocation", "--allocation-id", help="Allocation ID or exact name"),
     all_resources: bool = typer.Option(False, "--all", help="Show unavailable resources too"),
     refresh_workspace: bool = typer.Option(False, "--refresh-workspace"),
     table_width: int = typer.Option(160, "--table-width"),

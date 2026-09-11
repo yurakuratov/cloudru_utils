@@ -88,6 +88,7 @@ cloudru allocations workloads alloc-airi-master-jobs-h100-sr006 --type notebook 
 cloudru resources instance-types --region SR006
 cloudru resources available
 cloudru resources available --all
+cloudru resources available --allocation ALLOCATION_ID_OR_NAME
 cloudru resources used
 cloudru resources used --region SR006 --n 2000
 cloudru resources used --all

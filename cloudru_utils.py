@@ -1631,7 +1631,7 @@ class CloudRuAPIClient:
         """Show current allocation resource availability in sorted rich tables.
 
         Args:
-            allocation_id (str, optional): Allocation ID. If not provided, use all current workspace allocations.
+            allocation_id (str, optional): Allocation UUID or exact name. If omitted, use all current workspace allocations.
             only_available (bool, optional): Show only rows with available > 0. Defaults to True.
             refresh_workspace (bool, optional): Refresh workspace info when resolving allocation automatically.
             table_width (int, optional): Console table width. Defaults to 160.
@@ -1679,7 +1679,7 @@ class CloudRuAPIClient:
                     console.print(Panel('No valid allocation IDs found in workspace.', title='Available Resources'))
                 return {} if return_data else None
         else:
-            allocation_ids = [allocation_id]
+            allocation_ids = [self._resolve_allocation_selector(allocation_id)[0]]
 
         all_results = {}
 
@@ -1692,6 +1692,14 @@ class CloudRuAPIClient:
             allocation_meta = allocation_meta_by_id.get(current_allocation_id, {})
             allocation_region = allocation_meta.get('region')
             allocation_name = allocation_meta.get('name')
+            if not allocation_region:
+                try:
+                    allocation = self._get_allocation(current_allocation_id)
+                except (RuntimeError, requests.RequestException):
+                    pass  # Missing metadata must not hide resource availability.
+                else:
+                    allocation_region = allocation.get('region_key')
+                    allocation_name = allocation_name or allocation.get('name')
             row_region = allocation_region or 'Unknown'
             if allocation_name:
                 allocation_title_label = f'Allocation: {allocation_name} ({current_allocation_id})'
