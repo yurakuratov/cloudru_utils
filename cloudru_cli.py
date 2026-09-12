@@ -4,8 +4,10 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import getpass
+from importlib.metadata import version
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -27,6 +29,8 @@ from cloudru_config import (
     list_auth_profiles,
     load_cached_token,
     load_profile,
+    load_snapshot_profile,
+    load_submit_profile,
     load_default_allocation,
     redact,
     save_cached_token,
@@ -35,6 +39,12 @@ from cloudru_config import (
 )
 from cloudru_bot import run_bot
 from cloudru_utils import CloudRuAPIClient
+from cloudru_snapshot import (
+    DEFAULT_MAX_BYTES,
+    create_snapshot,
+    prepare_snapshot,
+)
+from cloudru_storage import resolve_upload_config, upload_snapshot
 
 
 DEFAULT_SOURCE = "auto"
@@ -451,15 +461,27 @@ def _render_cost_report(report: dict, table_width: int) -> None:
         console.print(Panel(warning_text, title="Warnings"))
 
 
-def _load_job_yaml(path: str) -> tuple[dict, dict]:
+def _load_job_document(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError:
+            raise RuntimeError("Invalid job YAML syntax") from None
+
+    if data is None:
+        data = {}
 
     if not isinstance(data, dict):
         raise RuntimeError("YAML file must contain an object at top level")
+    if "snapshot" not in data and "s3" in data:
+        raise RuntimeError("YAML s3 settings require a snapshot section")
+    return data
+
+
+def _job_sections(data: dict) -> tuple[dict, dict]:
 
     setup_cfg = data.get("setup", {})
-    if setup_cfg is None:
+    if setup_cfg is None and "snapshot" not in data:
         setup_cfg = {}
     if not isinstance(setup_cfg, dict):
         raise RuntimeError("YAML key 'setup' must contain an object")
@@ -555,11 +577,21 @@ def _should_use_bootstrap(setup_cfg: dict) -> bool:
     ])
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"cloudru {version('cloudru-utils')}")
+        raise typer.Exit()
+
+
 @app.callback()
 def root_callback(
     ctx: typer.Context,
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
+    show_version: bool = typer.Option(
+        False, "--version", "-v", callback=_version_callback, is_eager=True,
+        help="Show the installed version and exit",
+    ),
 ) -> None:
     ctx.obj = {"profile": profile, "debug": debug}
 
@@ -614,6 +646,89 @@ def cmd_init(
         typer.echo(f"source: {init_source}")
     except typer.Exit:
         raise
+    except Exception as exc:
+        _fail(exc, debug_mode)
+
+
+def _snapshot_settings(ctx, profile, s3_prefix, s3_endpoint_url, aws_profile,
+                       aws_cli, aws_config_file, aws_credentials_file) -> dict:
+    values = load_snapshot_profile(_resolve_profile(ctx, profile))
+    overrides = {
+        "s3_snapshot_prefix": s3_prefix, "s3_endpoint_url": s3_endpoint_url,
+        "aws_profile": aws_profile, "aws_cli": aws_cli,
+        "aws_config_file": aws_config_file, "aws_credentials_file": aws_credentials_file,
+    }
+    values.update({key: value for key, value in overrides.items() if value is not None})
+    return values
+
+
+def _snapshot_protected_paths(values: dict) -> list[Path]:
+    # These paths are never source inputs, even when Git tracks or ignores them.
+    from cloudru_config import TOKEN_CACHE_PATH
+
+    return [CONFIG_PATH, CREDENTIALS_PATH, TOKEN_CACHE_PATH,
+            Path(values.get("aws_config_file") or "~/.aws/config").expanduser(),
+            Path(values.get("aws_credentials_file") or "~/.aws/credentials").expanduser()]
+
+
+def _snapshot_result(result: dict, as_json: bool, *, dry_run=False) -> None:
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=True, indent=2))
+    elif dry_run:
+        typer.echo("Snapshot dry run (no files created or uploaded):")
+        typer.echo(yaml.safe_dump(result, sort_keys=False))
+    else:
+        typer.echo(result["archive_path"])
+        if result.get("s3_uri"):
+            typer.echo(f"Uploaded snapshot: {result['s3_uri']}", err=True)
+
+
+@app.command("snapshot", help="Capture source as a local archive and optionally upload it to S3")
+def cmd_snapshot(
+    ctx: typer.Context,
+    source: str = typer.Argument(..., help="Directory, repository subtree, or single file"),
+    output_dir: str = typer.Option("./snapshots", "--output-dir", "-o"),
+    upload: bool = typer.Option(False, "--upload"),
+    use_gitignore: bool = typer.Option(True, "--use-gitignore/--no-use-gitignore"),
+    exclude: Optional[list[str]] = typer.Option(None, "--exclude", help="Repeatable source-relative exclusion"),
+    exclude_from: Optional[str] = typer.Option(None, "--exclude-from", help="File of exclusion patterns"),
+    max_bytes: int = typer.Option(DEFAULT_MAX_BYTES, "--max-bytes", min=1),
+    s3_prefix: Optional[str] = typer.Option(None, "--s3-prefix"),
+    s3_endpoint_url: Optional[str] = typer.Option(None, "--s3-endpoint-url"),
+    aws_profile: Optional[str] = typer.Option(None, "--aws-profile"),
+    aws_cli: Optional[str] = typer.Option(None, "--aws-cli"),
+    aws_config_file: Optional[str] = typer.Option(None, "--aws-config-file"),
+    aws_credentials_file: Optional[str] = typer.Option(None, "--aws-credentials-file"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
+    as_json: bool = typer.Option(False, "--json"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    debug: bool = typer.Option(False, "--debug"),
+) -> None:
+    debug_mode = _resolve_debug(ctx, debug)
+    try:
+        if not upload and any(value is not None for value in (
+                s3_prefix, s3_endpoint_url, aws_profile, aws_cli, aws_config_file, aws_credentials_file)):
+            raise RuntimeError("Upload options require --upload")
+        values = _snapshot_settings(ctx, profile, s3_prefix, s3_endpoint_url, aws_profile,
+                                    aws_cli, aws_config_file, aws_credentials_file)
+        storage = resolve_upload_config(values) if upload else None
+        plan = prepare_snapshot(source, output_dir, use_gitignore=use_gitignore,
+                                exclude=exclude, exclude_from=exclude_from, max_bytes=max_bytes,
+                                protected_paths=_snapshot_protected_paths(values))
+        if dry_run:
+            result = {"dry_run": True, "operation": "create", **plan.public_dict(),
+                      "upload": storage.public_dict() if storage else None}
+        else:
+            typer.echo(f"Capturing source: {plan.source}", err=True)
+            result = create_snapshot(plan)
+            if storage:
+                typer.echo("Uploading snapshot to S3", err=True)
+                try:
+                    result = upload_snapshot(result, storage)
+                except Exception:
+                    typer.echo(f"Local snapshot retained: {result['archive_path']}", err=True)
+                    raise
+        _snapshot_result(result, as_json, dry_run=dry_run)
     except Exception as exc:
         _fail(exc, debug_mode)
 
@@ -852,7 +967,7 @@ def cmd_instance_types(
 @resources_app.command("available", help="Show currently available resources")
 def cmd_available_resources(
     ctx: typer.Context,
-    allocation_id: Optional[str] = typer.Option(None, "--allocation-id"),
+    allocation_id: Optional[str] = typer.Option(None, "--allocation", "--allocation-id", help="Allocation ID or exact name"),
     all_resources: bool = typer.Option(False, "--all", help="Show unavailable resources too"),
     refresh_workspace: bool = typer.Option(False, "--refresh-workspace"),
     table_width: int = typer.Option(160, "--table-width"),
@@ -1325,6 +1440,16 @@ def cmd_jobs_kill(
         _fail(exc, debug_mode)
 
 
+def _check_submit_response(response) -> None:
+    job_id = response.get("job_name") if isinstance(response, dict) else None
+    if isinstance(job_id, str) and job_id.strip():
+        return
+    error_message = response.get("error_message") if isinstance(response, dict) else None
+    if isinstance(error_message, str) and error_message.strip():
+        raise RuntimeError(error_message)
+    raise RuntimeError("API response did not include an accepted job_name; submission is unconfirmed and will not be retried")
+
+
 @jobs_app.command("submit", help="Submit job from YAML with CLI overrides")
 def cmd_jobs_submit(
     ctx: typer.Context,
@@ -1346,19 +1471,42 @@ def cmd_jobs_submit(
     check_hf_auth: Optional[bool] = typer.Option(None, "--check-hf-auth/--no-check-hf-auth"),
     pre_command: Optional[list[str]] = typer.Option(None, "--pre-command", help="Repeatable setup command"),
     no_bootstrap: bool = typer.Option(False, "--no-bootstrap", help="Submit raw script without setup wrapper"),
+    snapshot_s3_prefix: Optional[str] = typer.Option(None, "--snapshot-s3-prefix"),
+    collect_outputs_to: Optional[str] = typer.Option(None, "--collect-outputs-to", help="S3 destination template for configured outputs"),
+    s3_endpoint_url: Optional[str] = typer.Option(None, "--s3-endpoint-url"),
+    aws_profile: Optional[str] = typer.Option(None, "--aws-profile"),
+    aws_cli: Optional[str] = typer.Option(None, "--aws-cli"),
+    aws_config_file: Optional[str] = typer.Option(None, "--aws-config-file"),
+    aws_credentials_file: Optional[str] = typer.Option(None, "--aws-credentials-file"),
+    use_gitignore: Optional[bool] = typer.Option(None, "--use-gitignore/--no-use-gitignore"),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON response"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print merged config and do not submit"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
     debug_mode = _resolve_debug(ctx, debug)
+    managed = None
     try:
         if allocation_name is not None and not allocation_name.strip():
             raise RuntimeError("--allocation-name must not be blank")
-        client, cfg = _build_client(_resolve_profile(ctx, profile))
-
-        setup_cfg, raw_job_cfg = _load_job_yaml(file)
-        submit_kwargs = {k: v for k, v in raw_job_cfg.items() if k in SUBMIT_JOB_ALLOWED_FIELDS}
+        selected_profile = _resolve_profile(ctx, profile)
+        document = _load_job_document(file)
+        setup_cfg, raw_job_cfg = _job_sections(document)
+        is_managed = "snapshot" in document
+        if not is_managed and ("outputs" in document or collect_outputs_to is not None):
+            raise RuntimeError("Output collection requires a snapshot section in YAML")
+        if is_managed:
+            cfg = load_submit_profile(selected_profile)
+        else:
+            client, cfg = _build_client(selected_profile)
+        submit_kwargs = dict(raw_job_cfg) if is_managed else {k: v for k, v in raw_job_cfg.items() if k in SUBMIT_JOB_ALLOWED_FIELDS}
+        storage_overrides = {
+            "s3_snapshot_prefix": snapshot_s3_prefix, "s3_endpoint_url": s3_endpoint_url,
+            "aws_profile": aws_profile, "aws_cli": aws_cli,
+            "aws_config_file": aws_config_file, "aws_credentials_file": aws_credentials_file,
+        }
+        if not is_managed and (use_gitignore is not None or any(value is not None for value in storage_overrides.values())):
+            raise RuntimeError("Snapshot CLI options require a snapshot section in YAML")
 
         overrides = {
             "script": script,
@@ -1380,7 +1528,9 @@ def cmd_jobs_submit(
 
         env_overrides = _parse_env_overrides(env or [])
         if env_overrides:
-            env_variables = submit_kwargs.get("env_variables") or {}
+            env_variables = submit_kwargs.get("env_variables", {})
+            if env_variables is None and not is_managed:
+                env_variables = {}
             if not isinstance(env_variables, dict):
                 raise RuntimeError("env_variables in YAML must be an object")
             env_variables = dict(env_variables)
@@ -1398,6 +1548,46 @@ def cmd_jobs_submit(
             setup_effective["check_hf_auth"] = check_hf_auth
         if pre_command is not None and len(pre_command) > 0:
             setup_effective["pre_command"] = pre_command
+
+        if is_managed:
+            from cloudru_job_submit import prepare_snapshot_submission
+
+            managed = prepare_snapshot_submission(
+                document, submit_kwargs, setup_effective, base=Path.cwd(),
+                profile_values=cfg, storage_overrides=storage_overrides,
+                allowed_job_fields=SUBMIT_JOB_ALLOWED_FIELDS, no_bootstrap=no_bootstrap,
+                use_gitignore=use_gitignore, collect_outputs_to=collect_outputs_to)
+            if dry_run:
+                preview = managed.preview()
+                typer.echo(json.dumps(preview, ensure_ascii=True, indent=2) if as_json else yaml.safe_dump(preview, sort_keys=False))
+                return
+            runtime_config, payload = managed.materialize(lambda message: typer.echo(message, err=True))
+            client, _ = _build_client(selected_profile)
+            typer.echo("Submitting snapshot job", err=True)
+            response = client.submit_job(**payload)
+            accepted_id = response.get("job_name") if isinstance(response, dict) else None
+            if not isinstance(accepted_id, str) or not accepted_id.strip():
+                accepted_id = None
+            result = {
+                "job_id": accepted_id,
+                "snapshot_uri": runtime_config["snapshot"]["uri"],
+                "job_dir": runtime_config["job"]["env_variables"]["CLOUDRU_JOB_DIR"],
+                "response": response,
+            }
+            if runtime_config.get("outputs"):
+                result["collect_outputs_to"] = runtime_config["collect_outputs_to"]
+            if managed.archive:
+                result["archive_path"] = managed.archive["archive_path"]
+            if as_json:
+                typer.echo(json.dumps(result, ensure_ascii=True, indent=2))
+            else:
+                typer.echo(f"Job ID: {result['job_id'] or 'not returned by API'}")
+                typer.echo(f"Job directory: {result['job_dir']}")
+                typer.echo(f"Snapshot URI: {result['snapshot_uri']}")
+                if "collect_outputs_to" in result:
+                    typer.echo(f"Collect outputs to: {result['collect_outputs_to']}")
+            _check_submit_response(response)
+            return
 
         required = ["script", "base_image", "instance_type", "region"]
         missing = [k for k in required if not submit_kwargs.get(k)]
@@ -1422,6 +1612,8 @@ def cmd_jobs_submit(
         result = client.submit_job(**submit_kwargs)
         if as_json:
             typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        _check_submit_response(result)
+        if as_json:
             return
 
         console = Console()
@@ -1431,6 +1623,8 @@ def cmd_jobs_submit(
             console.print(f"Next: cloudru jobs status {job_name}")
             console.print(f"Next: cloudru jobs logs {job_name}")
     except Exception as exc:
+        if managed is not None and managed.archive:
+            typer.echo(f"Local snapshot retained: {managed.archive['archive_path']}", err=True)
         _fail(exc, debug_mode)
 
 

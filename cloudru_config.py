@@ -12,6 +12,39 @@ CREDENTIALS_PATH = CONFIG_DIR / "credentials"
 TOKEN_CACHE_PATH = CONFIG_DIR / "token_cache"
 TELEGRAM_CONFIG_PATH = CONFIG_DIR / "telegram.ini"
 
+SNAPSHOT_STORAGE_KEYS = (
+    "s3_snapshot_prefix", "s3_endpoint_url", "aws_profile", "aws_cli",
+    "aws_config_file", "aws_credentials_file",
+)
+
+
+def load_snapshot_profile(profile: str = "default") -> dict:
+    """Read only snapshot storage settings, without initializing auth/config files."""
+    return _read_profile_settings(profile, SNAPSHOT_STORAGE_KEYS)
+
+
+def load_submit_profile(profile: str = "default") -> dict:
+    """Read submission defaults without credentials, tokens, or file creation."""
+    allocation_keys = ("default_allocation", "default_allocation_region")
+    values = _read_profile_settings(profile, (*SNAPSHOT_STORAGE_KEYS, "region", *allocation_keys))
+    for key in allocation_keys:
+        values[key] = (values[key] or "").strip() or None
+    values["region"] = os.getenv("CLOUDRU_REGION", values.get("region"))
+    return values
+
+
+def _read_profile_settings(profile: str, keys) -> dict:
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        if CONFIG_PATH.exists():
+            with CONFIG_PATH.open(encoding="utf-8") as stream:
+                config.read_file(stream)
+    except (OSError, UnicodeError, configparser.Error):
+        # ConfigParser exceptions can contain the malformed line, including secrets.
+        raise RuntimeError(f"Cannot read Cloud.ru configuration: {CONFIG_PATH}") from None
+    section = config[profile] if config.has_section(profile) else {}
+    return {key: section.get(key) for key in keys}
+
 
 def _read_ini(path: Path) -> configparser.ConfigParser:
     parser = configparser.ConfigParser()
