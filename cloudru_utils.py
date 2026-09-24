@@ -536,15 +536,26 @@ class CloudRuAPIClient:
         except (ValueError, TypeError, AttributeError, OverflowError):
             return None
 
-    def _get_allocation_workspace_names(self, allocation_id):
-        """Best-effort display names; allocation detail access is optional for listing jobs."""
+    def _get_allocation_workspace_names(self, allocation_id, strict=False):
+        """Best-effort display names, or required metadata for workspace filtering."""
         try:
             allocation = self._get_allocation(allocation_id)
-        except (RuntimeError, requests.RequestException):
+        except (RuntimeError, requests.RequestException) as exc:
+            if strict:
+                raise RuntimeError(f'Cannot resolve workspace names: {exc}') from exc
             return {}
         workspaces = allocation.get('workspace_access')
         if not isinstance(workspaces, list):
+            if strict:
+                raise RuntimeError('Cannot resolve workspace names: invalid or missing workspace_access metadata.')
             return {}
+        if strict and not all(
+            isinstance(workspace, dict)
+            and isinstance(workspace.get('id'), str) and workspace['id']
+            and isinstance(workspace.get('name'), str) and workspace['name']
+            for workspace in workspaces
+        ):
+            raise RuntimeError('Cannot resolve workspace names: invalid workspace_access metadata.')
         return {
             workspace['id']: workspace['name']
             for workspace in workspaces
@@ -594,16 +605,45 @@ class CloudRuAPIClient:
 
     def allocation_queue(self, allocation_id, status_in=None, status_not_in=None, regions=None,
                         queues=None, workspace_id=None, n_last=20, table_width=160,
-                        return_data=False, show_table=True):
+                        return_data=False, show_table=True, workspace_names=None, workspace_ids=None):
         """List jobs exposed by allocation queues across visible workspaces.
 
         Allocation and queue selectors accept UUIDs or exact names. Filters are
         applied locally, followed by a global newest-first limit. An omitted
         region never inherits the profile region. This is not a job-history API.
+        workspace_names selects any of the exact, case-sensitive names and cannot
+        be combined with workspace_id or workspace_ids. workspace_ids selects any
+        of the supplied IDs and cannot be combined with workspace_id.
         """
         if isinstance(n_last, bool) or not isinstance(n_last, int) or n_last < 1:
             raise RuntimeError('Job limit must be a positive integer')
+        if workspace_ids is not None:
+            if workspace_id is not None or workspace_names is not None:
+                raise RuntimeError('Cannot combine workspace_ids with workspace_id or workspace_names.')
+            if (isinstance(workspace_ids, str) or not workspace_ids
+                    or any(not isinstance(wid, str) or not wid.strip() for wid in workspace_ids)):
+                raise RuntimeError('workspace_ids must contain at least one non-empty workspace ID.')
+        if workspace_names is not None:
+            if workspace_id is not None:
+                raise RuntimeError('Cannot combine workspace_names with workspace_id; use --workspace or --workspace-id.')
+            if (isinstance(workspace_names, str) or not workspace_names
+                    or any(not isinstance(name, str) or not name.strip() for name in workspace_names)):
+                raise RuntimeError('workspace_names must contain at least one non-empty workspace name.')
         resolved_id, resolved_name = self._resolve_allocation_selector(allocation_id)
+        workspace_names_by_id = None
+        selected_workspace_ids = set(workspace_ids or [])
+        if workspace_names is not None:
+            workspace_names_by_id = self._get_allocation_workspace_names(resolved_id, strict=True)
+            for name in dict.fromkeys(workspace_names):
+                matches = [wid for wid, wname in workspace_names_by_id.items() if wname == name]
+                if not matches:
+                    raise RuntimeError(f'Workspace {name!r} was not found by exact name in allocation {allocation_id!r}.')
+                if len(matches) > 1:
+                    raise RuntimeError(
+                        f'Workspace name {name!r} is ambiguous. Matching IDs: {", ".join(matches)}. '
+                        'Use --workspace-id.'
+                    )
+                selected_workspace_ids.add(matches[0])
         available_queues = self._get_allocation_queues(resolved_id)
         selected_ids = set()
         for selector in queues or []:
@@ -632,6 +672,9 @@ class CloudRuAPIClient:
                     continue
                 if workspace_id is not None and job.get('workspace') != workspace_id:
                     continue
+                if ((workspace_names is not None or workspace_ids is not None)
+                        and job.get('workspace') not in selected_workspace_ids):
+                    continue
                 created = self._parse_allocation_job_datetime(job.get('created_at'))
                 jobs_data.append({
                     **job,
@@ -649,9 +692,10 @@ class CloudRuAPIClient:
         jobs_data.sort(key=lambda job: job['_created_sort'], reverse=True)
         jobs_data = jobs_data[:n_last]
         if jobs_data:
-            workspace_names = self._get_allocation_workspace_names(resolved_id)
+            if workspace_names_by_id is None:
+                workspace_names_by_id = self._get_allocation_workspace_names(resolved_id)
             for job in jobs_data:
-                job['workspace_name'] = workspace_names.get(job['workspace_id'])
+                job['workspace_name'] = workspace_names_by_id.get(job['workspace_id'])
         rows = self._render_jobs_table(
             jobs_data, f'Job Queue (Allocation: {resolved_name or resolved_id})',
             'Created', lambda job: self._format_job_datetime(job.get('created_dt')),
