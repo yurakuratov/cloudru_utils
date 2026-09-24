@@ -27,6 +27,7 @@ from cloudru_config import (
     CREDENTIALS_PATH,
     file_mode,
     list_auth_profiles,
+    list_profile_workspace_ids,
     load_cached_token,
     load_profile,
     load_snapshot_profile,
@@ -845,7 +846,9 @@ def cmd_allocations_queue(
     status: Optional[list[str]] = typer.Option(None, "--status", help="Repeatable or comma-separated"),
     status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Repeatable or comma-separated"),
     queue: Optional[list[str]] = typer.Option(None, "--queue", help="Queue UUID or exact name; repeatable"),
-    workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="Filter by owning workspace UUID"),
+    workspace: Optional[list[str]] = typer.Option(None, "--workspace", help="Filter by workspace names (exact, case-sensitive); repeat flag or comma-separate multiple names; cannot combine with --workspace-id"),
+    workspace_id: Optional[list[str]] = typer.Option(None, "--workspace-id", help="Filter by owning workspace UUIDs; repeat flag or comma-separate multiple IDs; cannot combine with --workspace"),
+    all_profile_workspaces: bool = typer.Option(False, "--all-profile-workspaces", help="Filter to workspace IDs from all saved profiles; authenticate using --profile; cannot combine with --workspace or --workspace-id"),
     n: int = typer.Option(20, "--n", min=1, help="Maximum jobs across all selected queues"),
     as_json: bool = typer.Option(False, "--json", help="Print normalized job rows as JSON"),
     table_width: int = typer.Option(160, "--table-width"),
@@ -856,10 +859,30 @@ def cmd_allocations_queue(
     try:
         normalized_status = _normalize_status_list(status or [], "--status")
         normalized_status_not = _normalize_status_list(status_not or [], "--status-not")
+        workspace_names = None
+        workspace_ids = None
+        if all_profile_workspaces:
+            if workspace or workspace_id:
+                raise RuntimeError('Cannot combine --all-profile-workspaces with --workspace or --workspace-id.')
+            workspace_ids = list_profile_workspace_ids()
+            if not workspace_ids:
+                raise RuntimeError('No saved workspace IDs found. Configure x_workspace_id in ~/.cloudru/credentials.')
+        if workspace:
+            if workspace_id:
+                raise RuntimeError('Cannot combine --workspace with --workspace-id.')
+            workspace_names = _parse_csv_options(workspace)
+            if not workspace_names:
+                raise RuntimeError('--workspace must contain at least one non-empty workspace name.')
+        if workspace_id:
+            workspace_ids = _parse_csv_options(workspace_id)
+            if not workspace_ids:
+                raise RuntimeError('--workspace-id must contain at least one non-empty workspace ID.')
         client, cfg = _build_client(_resolve_profile(ctx, profile))
         data = client.allocation_queue(
             _resolve_allocation(allocation, cfg), status_in=normalized_status, status_not_in=normalized_status_not,
-            regions=region, queues=queue, workspace_id=workspace_id, n_last=n,
+            regions=region, queues=queue, workspace_id=None, n_last=n,
+            workspace_names=workspace_names,
+            workspace_ids=workspace_ids,
             table_width=table_width, return_data=as_json, show_table=not as_json,
         )
         if as_json:

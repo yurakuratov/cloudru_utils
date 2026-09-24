@@ -233,6 +233,24 @@ def list_profiles() -> list[str]:
     return sorted(profiles)
 
 
+def list_profile_workspace_ids() -> list[str]:
+    """Read distinct saved workspace IDs without environment overrides or file creation."""
+    credentials = configparser.ConfigParser(interpolation=None)
+    try:
+        with CREDENTIALS_PATH.open(encoding="utf-8") as stream:
+            credentials.read_file(stream)
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError, configparser.Error):
+        # Parser errors can include credential values from the malformed line.
+        raise RuntimeError(f"Cannot read Cloud.ru credentials: {CREDENTIALS_PATH}") from None
+    return sorted({
+        workspace_id
+        for profile in credentials.sections()
+        if (workspace_id := credentials[profile].get("x_workspace_id", "").strip())
+    })
+
+
 def list_auth_profiles() -> list[str]:
     """Return profile names that have cloudru auth credentials."""
     ensure_storage()
