@@ -11,12 +11,14 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import time
 import traceback
 import uuid
 from typing import Optional
 
 import typer
 import yaml
+from click.core import ParameterSource
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -1463,6 +1465,53 @@ def cmd_jobs_kill(
         _fail(exc, debug_mode)
 
 
+def _submit_with_retry(client, payload: dict, *, retry: bool, interval: int, timeout: Optional[int]):
+    """Retry explicit capacity rejections; return the final response for normal rendering."""
+    if not retry:
+        return client.submit_job(**payload)
+
+    started = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        response = client.submit_job(**payload)
+        job_id = response.get("job_name") if isinstance(response, dict) else None
+        if isinstance(job_id, str) and job_id.strip():
+            return response
+        message = response.get("error_message") if isinstance(response, dict) else None
+        if not isinstance(message, str) or not re.fullmatch(
+            r"PROJECT_GPU_LIMIT_REACHED_ONLY_[0-9]+_FREE", message.strip()
+        ):
+            return response
+
+        elapsed = time.monotonic() - started
+        remaining = None if timeout is None else timeout - elapsed
+        if remaining is not None and remaining <= 0:
+            break
+        delay = interval if remaining is None else min(interval, remaining)
+        timeout_text = "" if timeout is None else f", timeout {timeout}s"
+        typer.echo(
+            f"Attempt {attempt}: {message.strip()}\n"
+            f"Retrying in {delay:g}s (elapsed {elapsed:g}s{timeout_text})…",
+            err=True,
+        )
+        time.sleep(delay)
+        if timeout is not None and time.monotonic() - started >= timeout:
+            break
+
+    typer.echo(f"Retry timeout exhausted after {attempt} attempt(s) (timeout {timeout}s).", err=True)
+    return response
+
+
+def _parse_retry_timeout(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    match = re.fullmatch(r"([1-9][0-9]*)([smhd])", value.strip())
+    if not match:
+        raise RuntimeError("Invalid --retry-timeout; use a positive duration such as 30s, 5m, 2h, or 1d")
+    return int(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match[2]]
+
+
 def _check_submit_response(response) -> None:
     job_id = response.get("job_name") if isinstance(response, dict) else None
     if isinstance(job_id, str) and job_id.strip():
@@ -1502,6 +1551,9 @@ def cmd_jobs_submit(
     aws_config_file: Optional[str] = typer.Option(None, "--aws-config-file"),
     aws_credentials_file: Optional[str] = typer.Option(None, "--aws-credentials-file"),
     use_gitignore: Optional[bool] = typer.Option(None, "--use-gitignore/--no-use-gitignore"),
+    retry: bool = typer.Option(False, "--retry", help="Retry submission until accepted or interrupted"),
+    retry_interval: int = typer.Option(60, "--retry-interval", min=1, help="Seconds between rejected submissions; requires --retry"),
+    retry_timeout: Optional[str] = typer.Option(None, "--retry-timeout", help="Maximum retry duration (e.g. 30s, 5m, 2h, 1d); requires --retry; default: unlimited"),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON response"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print merged config and do not submit"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
@@ -1510,6 +1562,10 @@ def cmd_jobs_submit(
     debug_mode = _resolve_debug(ctx, debug)
     managed = None
     try:
+        if not retry and (retry_timeout is not None or
+                          ctx.get_parameter_source("retry_interval") == ParameterSource.COMMANDLINE):
+            raise RuntimeError("--retry-interval and --retry-timeout require --retry")
+        retry_timeout_seconds = _parse_retry_timeout(retry_timeout)
         if allocation_name is not None and not allocation_name.strip():
             raise RuntimeError("--allocation-name must not be blank")
         selected_profile = _resolve_profile(ctx, profile)
@@ -1587,7 +1643,8 @@ def cmd_jobs_submit(
             runtime_config, payload = managed.materialize(lambda message: typer.echo(message, err=True))
             client, _ = _build_client(selected_profile)
             typer.echo("Submitting snapshot job", err=True)
-            response = client.submit_job(**payload)
+            response = _submit_with_retry(client, payload, retry=retry, interval=retry_interval,
+                                          timeout=retry_timeout_seconds)
             accepted_id = response.get("job_name") if isinstance(response, dict) else None
             if not isinstance(accepted_id, str) or not accepted_id.strip():
                 accepted_id = None
@@ -1632,7 +1689,8 @@ def cmd_jobs_submit(
             typer.echo(final_script)
             return
 
-        result = client.submit_job(**submit_kwargs)
+        result = _submit_with_retry(client, submit_kwargs, retry=retry, interval=retry_interval,
+                                    timeout=retry_timeout_seconds)
         if as_json:
             typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         _check_submit_response(result)
@@ -1645,6 +1703,10 @@ def cmd_jobs_submit(
         if job_name:
             console.print(f"Next: cloudru jobs status {job_name}")
             console.print(f"Next: cloudru jobs logs {job_name}")
+    except KeyboardInterrupt:
+        if managed is not None and managed.archive:
+            typer.echo(f"Local snapshot retained: {managed.archive['archive_path']}", err=True)
+        raise
     except Exception as exc:
         if managed is not None and managed.archive:
             typer.echo(f"Local snapshot retained: {managed.archive['archive_path']}", err=True)

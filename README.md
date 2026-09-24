@@ -106,6 +106,8 @@ cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
 cloudru jobs submit -f job.yaml --allocation-name alloc-airi-master-jobs-h100-sr006
 cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
 cloudru jobs submit -f job.yaml --json
+cloudru jobs submit -f job.yaml --retry
+cloudru jobs submit -f job.yaml --retry --retry-interval 60 --retry-timeout 2h
 cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
 cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -188,6 +190,22 @@ Config files:
 Profile selection:
 - `--profile`
 - `CLOUDRU_PROFILE`
+
+### Waiting for free GPUs
+
+Add `--retry` to try again every 60 seconds when submission fails with
+`PROJECT_GPU_LIMIT_REACHED_ONLY_<N>_FREE`. It stops when the job is accepted,
+another error occurs, or you press Ctrl+C. Without `--retry`, it tries once.
+
+Use `--retry-interval 30` to change the delay to 30 seconds, or
+`--retry-timeout 2h` to stop trying after two hours. Both require `--retry`.
+Timeouts accept `s`, `m`, `h`, or `d` and start after preparation and upload;
+a request already in progress may finish later. There is no timeout by default.
+
+Snapshots are created and uploaded once, and local archives are kept on failure.
+Progress goes to stderr, so `--json` still produces one final response.
+`--dry-run` never submits or waits. This flag does not restart failed jobs or
+change `job.max_retry`.
 
 ### Allocations
 
