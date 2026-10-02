@@ -73,11 +73,11 @@ cloudru allocations list
 cloudru allocations use alloc-airi-master-jobs-h100-sr006
 cloudru allocations queue
 cloudru allocations workloads
-cloudru allocations status
-cloudru allocations show 00000000-0000-4000-8000-000000000000
-cloudru allocations show alloc-airi-master-jobs-h100-sr006
-cloudru allocations status alloc-airi-master-jobs-h100-sr006
-cloudru allocations status 00000000-0000-4000-8000-000000000000 --json
+cloudru allocations resources
+cloudru allocations info 00000000-0000-4000-8000-000000000000
+cloudru allocations info alloc-airi-master-jobs-h100-sr006
+cloudru allocations resources alloc-airi-master-jobs-h100-sr006
+cloudru allocations resources 00000000-0000-4000-8000-000000000000 --json
 cloudru allocations queue alloc-airi-master-jobs-h100-sr006
 cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --status Running --n 50
 cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --queue default --workspace-id <workspace-uuid>
@@ -222,8 +222,8 @@ The default is saved for your profile in `~/.cloudru/config`.
 | --- | --- |
 | `cloudru allocations queue` | Running and waiting jobs across workspaces; requires custom queues |
 | `cloudru allocations workloads` | Jobs and notebooks assigned to nodes; also works without custom queues |
-| `cloudru allocations status` | Resource usage and availability |
-| `cloudru allocations show` | Allocation details |
+| `cloudru allocations resources` | Resource usage and availability |
+| `cloudru allocations info` | Allocation details |
 
 Common filters and a one-off allocation override:
 
@@ -580,7 +580,7 @@ cloud_client.workspace_info(refresh=False)
 allocation_id = "00000000-0000-4000-8000-000000000000"
 cloud_client.allocations()
 cloud_client.allocation_info(allocation_id)
-cloud_client.allocation_status("alloc-airi-master-jobs-h100-sr006")
+cloud_client.allocation_resources("alloc-airi-master-jobs-h100-sr006")
 cloud_client.allocation_queue("alloc-airi-master-jobs-h100-sr006", status_in=["Running"], n_last=50)
 rows = cloud_client.allocation_queue(allocation_id, return_data=True, show_table=False)
 cloud_client.allocation_workloads(allocation_id)
@@ -592,6 +592,7 @@ cloud_client.instance_types(region="SR006")
 # Available resources (auto source/fallback)
 cloud_client.available_resources(only_available=True)
 cloud_client.available_resources(source="instance_types_available")
+cloud_client.available_resources(source="allocation_instance_types")
 
 # Used resources (running, pending, total)
 cloud_client.used_resources(regions=["SR006"], n_last=1000)
@@ -618,14 +619,14 @@ cloud_client.kill_job(job_id, region="SR006")
 - `workspaces(table_width=160, return_data=False, show_table=True)`
 - `allocations(table_width=160, return_data=False, show_table=True)`
 - `allocation_info(allocation_id, table_width=160, return_data=False, show_table=True)`
-- `allocation_status(allocation_id, table_width=160, return_data=False, show_table=True)`
+- `allocation_resources(allocation_id, table_width=160, return_data=False, show_table=True)`
 - `allocation_queue(allocation_id, status_in=None, status_not_in=None, regions=None, queues=None, workspace_id=None, n_last=20, table_width=160, return_data=False, show_table=True, workspace_names=None, workspace_ids=None)`
 - `allocation_workloads(allocation_id, types=None, status_in=None, status_not_in=None, n_last=None, table_width=160, return_data=False, show_table=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
 - `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
 - `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True)`
 
-`allocation_info()`, `allocation_status()`, `allocation_queue()`, and `allocation_workloads()` accept either an allocation UUID or an exact, case-sensitive allocation name.
+`allocation_info()`, `allocation_resources()`, `allocation_queue()`, and `allocation_workloads()` accept either an allocation UUID or an exact, case-sensitive allocation name.
 
 ## Notes
 
