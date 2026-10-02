@@ -873,19 +873,6 @@ class CloudRuAPIClient:
         self._validate_allocation_resources_status(data['resources'], f'Get allocation {allocation_id}')
         return data
 
-    def _get_allocation_resources_status(self, allocation_id):
-        """Get current resource metrics for an allocation."""
-        data = self._get_allocation_api(
-            f'/allocations/{allocation_id}/resources_status',
-            f'Get allocation resources status {allocation_id}',
-            dict,
-        )
-        self._validate_allocation_resources_status(
-            data,
-            f'Get allocation resources status {allocation_id}',
-        )
-        return data
-
     @staticmethod
     def _validate_allocation_resources_status(data, operation):
         required_metrics = ('cpu', 'gpu', 'ram', 'nodes_status')
@@ -908,51 +895,58 @@ class CloudRuAPIClient:
                 f"Unexpected response from {operation}. Missing resource fields: {', '.join(missing_fields)}"
             )
 
-    def _get_allocation_instance_types_availability(self, allocation_id):
-        """Get current resource availability for allocation instance types.
-
-        Args:
-            allocation_id (str): Allocation ID
-
-        Returns:
-            list[dict]: Availability rows with `instance_type` and `available`
-        """
-        self._refresh_token()
-        url = f'{self.API_URL}/allocations/{allocation_id}/instance_types_availability'
-
-        headers = {
-            'accept': 'application/json',
-            'x-workspace-id': self.x_workspace_id,
-            'x-api-key': self.x_api_key,
-            'authorization': self.access_token,
-        }
-
-        response = self._request_with_auth('get', url, headers=headers)
-        return response.json()
+    def _get_allocation_instance_types(self, allocation_id):
+        """Get instance types with authoritative keys and availability counts."""
+        return self._get_allocation_api(
+            f'/allocations/{allocation_id}/instance-types',
+            f'Get instance types for allocation {allocation_id}', list,
+        )
 
     def _get_instance_types_available(self, region, allocation_name):
-        """Get available instance types for allocation using region endpoint.
+        """Get available instance types for an allocation using the region endpoint."""
+        return self._get_allocation_api(
+            f'/instance_types/{region}/available',
+            f'Get available instance types for {allocation_name} in {region}', dict,
+            params={'allocation_name': allocation_name},
+        )
 
-        Args:
-            region (str): Region key, e.g. SR006
-            allocation_name (str): Allocation name
+    RESOURCE_SOURCES = ('auto', 'instance_types_available', 'allocation_instance_types')
 
-        Returns:
-            dict: Response with `instance_types` array
-        """
-        self._refresh_token()
-        url = f'{self.API_URL}/instance_types/{region}/available'
+    @classmethod
+    def validate_resource_source(cls, source):
+        if source == 'allocations_instance_types_availability':
+            raise ValueError(
+                "Source 'allocations_instance_types_availability' has been removed; "
+                "replace it with 'allocation_instance_types' in --source, profile source, "
+                "or CLOUDRU_SOURCE."
+            )
+        if source not in cls.RESOURCE_SOURCES:
+            raise ValueError(f"Invalid source={source!r}. Use one of: {', '.join(cls.RESOURCE_SOURCES)}")
 
-        headers = {
-            'accept': 'application/json',
-            'x-workspace-id': self.x_workspace_id,
-            'x-api-key': self.x_api_key,
-            'authorization': self.access_token,
-        }
-
-        params = {'allocation_name': allocation_name}
-        response = self._request_with_auth('get', url, headers=headers, params=params)
-        return response.json()
+    def _normalize_available_rows(self, rows, count_field, region):
+        if not isinstance(rows, list):
+            raise RuntimeError('Invalid instance types response: expected an array')
+        normalized = []
+        for row in rows:
+            if (not isinstance(row, dict)
+                    or any(not isinstance(row.get(key), str) or not row[key].strip()
+                           for key in ('key', 'name'))
+                    or type(row.get(count_field)) is not int):
+                raise RuntimeError(
+                    f'Invalid instance type row: expected non-empty key/name and integer {count_field}'
+                )
+            name = row['name']
+            normalized.append({
+                'region': region,
+                'instance_type': row['key'],
+                'instance_name': name,
+                'available': row[count_field],
+                'gpu_family': self._resource_gpu_family(name),
+                'gpu_count': self._resource_gpu_count(name),
+                'ram_gb': self._resource_ram_gb(name),
+                'cpu_count': self._resource_cpu_count(name),
+            })
+        return normalized
 
     def _get_configs(self, cluster_type='MT'):
         """Get platform configs (regions, instance types, images)."""
@@ -1011,32 +1005,6 @@ class CloudRuAPIClient:
 
             self._instance_types_by_region_cache[region_key] = exact_map
             self._instance_types_normalized_by_region_cache[region_key] = normalized_map
-
-    def _resolve_instance_type_key(self, instance_type_name, region_key=None):
-        """Resolve public instance type name to API instance key."""
-        normalized_name = self._normalize_instance_type_name(instance_type_name)
-
-        if region_key and region_key in self._instance_types_by_region_cache:
-            exact_map = self._instance_types_by_region_cache.get(region_key, {})
-            if instance_type_name in exact_map:
-                return exact_map[instance_type_name]
-
-            normalized_map = self._instance_types_normalized_by_region_cache.get(region_key, {})
-            if normalized_name in normalized_map:
-                return normalized_map[normalized_name]
-
-        found_keys = set()
-        for current_region, exact_map in self._instance_types_by_region_cache.items():
-            if instance_type_name in exact_map:
-                found_keys.add(exact_map[instance_type_name])
-
-            normalized_map = self._instance_types_normalized_by_region_cache.get(current_region, {})
-            if normalized_name in normalized_map:
-                found_keys.add(normalized_map[normalized_name])
-
-        if len(found_keys) == 1:
-            return list(found_keys)[0]
-        return None
 
     def _default_region_from_workspace(self):
         """Resolve default region from current workspace allocations."""
@@ -1430,12 +1398,13 @@ class CloudRuAPIClient:
         return None
 
     def allocation_info(self, allocation_id, table_width=160, return_data=False, show_table=True):
-        """Show details for an allocation selected by UUID or exact name."""
+        """Show allocation details, limiting output to table_width and the terminal width."""
         resolved_id, _ = self._resolve_allocation_selector(allocation_id)
         data = self._get_allocation(resolved_id)
 
         if show_table:
-            console = Console(width=table_width)
+            console = Console()
+            console.width = min(table_width, console.width)
             target_resource = data.get('target_resource') or {}
             overview = Text()
             overview_fields = (
@@ -1450,11 +1419,14 @@ class CloudRuAPIClient:
                 ('Target GPUs', target_resource.get('gpus')),
             )
             for label, value in overview_fields:
+                if overview:
+                    overview.append('\n')
                 overview.append(f'{label}: ', style='bold')
-                overview.append(f'{value if value is not None else ""}\n')
-            console.print(Panel(
+                overview.append(f'{value if value is not None else ""}')
+            console.print(Panel.fit(
                 overview,
-                title=f"Allocation: {data.get('name')} ({data.get('id')})",
+                title='Allocation',
+                title_align='left',
             ))
 
             self._render_allocation_resources_status(
@@ -1488,10 +1460,10 @@ class CloudRuAPIClient:
             return data
         return None
 
-    def allocation_status(self, allocation_id, table_width=160, return_data=False, show_table=True):
+    def allocation_resources(self, allocation_id, table_width=160, return_data=False, show_table=True):
         """Show resource metrics for an allocation selected by UUID or exact name."""
         resolved_id, resolved_name = self._resolve_allocation_selector(allocation_id)
-        data = self._get_allocation_resources_status(resolved_id)
+        data = self._get_allocation(resolved_id)['resources']
 
         if show_table:
             console = Console(width=table_width)
@@ -1681,17 +1653,15 @@ class CloudRuAPIClient:
             table_width (int, optional): Console table width. Defaults to 160.
             return_data (bool, optional): If True, returns parsed rows by allocation. Defaults to False.
             source (str, optional): Data source strategy:
-                - 'auto': try instance_types/{region}/available first, fallback to allocations endpoint
+                - 'auto': try regional availability; fallback on failure or missing metadata
                 - 'instance_types_available': use only /instance_types/{region}/available
-                - 'allocations_instance_types_availability': use only /allocations/{id}/instance_types_availability
+                - 'allocation_instance_types': use only /allocations/{id}/instance-types
             show_table (bool, optional): Print rich table output. Defaults to True.
 
         Returns:
             dict[str, list[dict]] | None: Sorted rows by allocation when return_data=True.
         """
-        valid_sources = {'auto', 'instance_types_available', 'allocations_instance_types_availability'}
-        if source not in valid_sources:
-            raise ValueError(f"Invalid source={source!r}. Use one of: {sorted(valid_sources)}")
+        self.validate_resource_source(source)
 
         console = Console(width=table_width)
 
@@ -1708,8 +1678,6 @@ class CloudRuAPIClient:
             for allocation in self._workspace_allocations_cache
             if allocation.get('id')
         }
-
-        self._load_instance_types_cache(refresh=False, cluster_type='MT')
 
         if allocation_id is None:
             if not self._workspace_allocations_cache:
@@ -1752,67 +1720,31 @@ class CloudRuAPIClient:
             title_context = f'Workspace: {workspace_label}, {allocation_title_label}'
             resources_title = f'Available Resources ({title_context})'
 
-            normalized = []
+            normalized = None
             endpoint_errors = []
 
-            use_new_endpoint = source in {'auto', 'instance_types_available'}
-            use_old_endpoint = source in {'auto', 'allocations_instance_types_availability'}
-
-            if use_new_endpoint:
+            if source in {'auto', 'instance_types_available'}:
                 if allocation_region and allocation_name:
-                    new_data = self._get_instance_types_available(allocation_region, allocation_name)
-                    rows = new_data.get('instance_types', []) if isinstance(new_data, dict) else None
-                    if isinstance(rows, list):
-                        for row in rows:
-                            instance_name = row.get('name', '')
-                            instance_type = row.get('key')
-                            available = int(row.get('count', 0))
-                            normalized.append({
-                                'region': row_region,
-                                'instance_type': instance_type,
-                                'instance_name': instance_name,
-                                'available': available,
-                                'gpu_family': self._resource_gpu_family(instance_name),
-                                'gpu_count': self._resource_gpu_count(instance_name),
-                                'ram_gb': self._resource_ram_gb(instance_name),
-                                'cpu_count': self._resource_cpu_count(instance_name),
-                            })
-                    else:
-                        endpoint_errors.append(new_data)
+                    try:
+                        data = self._get_instance_types_available(allocation_region, allocation_name)
+                        rows = data.get('instance_types') if isinstance(data, dict) else None
+                        normalized = self._normalize_available_rows(rows, 'count', row_region)
+                    except (RuntimeError, ValueError, requests.RequestException) as exc:
+                        endpoint_errors.append(f'Regional availability: {exc}')
                 else:
-                    endpoint_errors.append({
-                        'error': 'Cannot call instance_types_available without allocation name/region',
-                        'allocation_id': current_allocation_id,
-                    })
+                    endpoint_errors.append('Regional availability requires allocation name and region')
 
-            if not normalized and use_old_endpoint:
-                old_data = self._get_allocation_instance_types_availability(current_allocation_id)
-                if isinstance(old_data, list):
-                    for row in old_data:
-                        instance_name = row.get('instance_type', '')
-                        available = int(row.get('available', 0))
-                        instance_type = self._resolve_instance_type_key(instance_name, region_key=allocation_region)
-                        normalized.append({
-                            'region': row_region,
-                            'instance_type': instance_type,
-                            'instance_name': instance_name,
-                            'available': available,
-                            'gpu_family': self._resource_gpu_family(instance_name),
-                            'gpu_count': self._resource_gpu_count(instance_name),
-                            'ram_gb': self._resource_ram_gb(instance_name),
-                            'cpu_count': self._resource_cpu_count(instance_name),
-                        })
-                else:
-                    endpoint_errors.append(old_data)
+            if normalized is None and source in {'auto', 'allocation_instance_types'}:
+                try:
+                    rows = self._get_allocation_instance_types(current_allocation_id)
+                    normalized = self._normalize_available_rows(rows, 'availability', row_region)
+                except (RuntimeError, ValueError, requests.RequestException) as exc:
+                    endpoint_errors.append(f'Allocation instance types: {exc}')
 
-            if not normalized and endpoint_errors:
-                if show_table:
-                    console.print(Panel(
-                        str(endpoint_errors[-1]),
-                        title=f'Available Resources Error ({title_context})',
-                    ))
-                all_results[current_allocation_id] = []
-                continue
+            if normalized is None:
+                raise RuntimeError(
+                    f'Available resources failed ({title_context}): ' + '; '.join(endpoint_errors)
+                )
 
             if only_available:
                 normalized = [row for row in normalized if row['available'] > 0]
