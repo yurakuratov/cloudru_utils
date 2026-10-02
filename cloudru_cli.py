@@ -457,10 +457,10 @@ def _render_cost_report(report: dict, table_width: int) -> None:
 
     console = Console(width=table_width)
     console.print(table)
-    console.print(Panel(summary, title="Job Cost Total"))
+    Console().print(Panel.fit(summary, title="Job Cost Total"))
     if report["warnings"]:
         warning_text = Text("\n".join(f"- {warning}" for warning in report["warnings"]))
-        console.print(Panel(warning_text, title="Warnings"))
+        Console().print(Panel.fit(warning_text, title="Warnings"))
 
 
 def _load_job_document(path: str) -> dict:
@@ -926,7 +926,7 @@ def cmd_allocations_info(
     ctx: typer.Context,
     allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
     as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
-    table_width: int = typer.Option(160, "--table-width", min=1, help="Maximum output width, capped at terminal width"),
+    table_width: int = typer.Option(160, "--table-width", min=1, help="Maximum table width, capped at terminal width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
@@ -1112,13 +1112,13 @@ def cmd_used_resources(
 
         console = Console(width=table_width)
         console.print(table)
-        console.print(Panel(totals_text, title="Used Resources Summary (All Profiles)"))
+        Console().print(Panel.fit(totals_text, title="Used Resources Summary (All Profiles)"))
 
         if failed_profiles:
             failed_text = Text()
             for profile_name, error in failed_profiles:
                 failed_text.append(f"- {profile_name}: {error}\n")
-            console.print(Panel(failed_text, title="Profiles with errors"))
+            Console().print(Panel.fit(failed_text, title="Profiles with errors"))
     except Exception as exc:
         _fail(exc, debug_mode)
 

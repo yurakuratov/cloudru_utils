@@ -1310,7 +1310,7 @@ class CloudRuAPIClient:
         info_text.append(f"{len(allocations)}")
 
         console = Console()
-        console.print(Panel(info_text, title="Workspace Info"))
+        console.print(Panel.fit(info_text, title="Workspace Info"))
 
         allocations_table = Table(title="Workspace Allocations")
         allocations_table.add_column("Allocation ID", style="cyan")
@@ -1373,7 +1373,7 @@ class CloudRuAPIClient:
         if show_table:
             console = Console(width=table_width)
             if not data:
-                console.print(Panel('No allocations found for current workspace.', title='Allocations'))
+                Console().print(Panel.fit('No allocations found for current workspace.', title='Allocations'))
             else:
                 table = Table(title='Allocations')
                 table.add_column('Allocation ID', style='cyan')
@@ -1398,7 +1398,7 @@ class CloudRuAPIClient:
         return None
 
     def allocation_info(self, allocation_id, table_width=160, return_data=False, show_table=True):
-        """Show allocation details, limiting output to table_width and the terminal width."""
+        """Show allocation details with compact panels and terminal-capped tables."""
         resolved_id, _ = self._resolve_allocation_selector(allocation_id)
         data = self._get_allocation(resolved_id)
 
@@ -1423,7 +1423,7 @@ class CloudRuAPIClient:
                     overview.append('\n')
                 overview.append(f'{label}: ', style='bold')
                 overview.append(f'{value if value is not None else ""}')
-            console.print(Panel.fit(
+            Console().print(Panel.fit(
                 overview,
                 title='Allocation',
                 title_align='left',
@@ -1542,8 +1542,7 @@ class CloudRuAPIClient:
         region_key = region or self._default_region_from_workspace()
 
         if not self._configs_cache:
-            console = Console(width=table_width)
-            console.print(Panel('Unable to load configs.', title='Instance Types'))
+            Console().print(Panel.fit('Unable to load configs.', title='Instance Types'))
             return []
 
         selected_region = None
@@ -1554,7 +1553,7 @@ class CloudRuAPIClient:
 
         console = Console(width=table_width)
         if selected_region is None:
-            console.print(Panel(f'Region {region_key} was not found in /configs response.', title='Instance Types'))
+            Console().print(Panel.fit(f'Region {region_key} was not found in /configs response.', title='Instance Types'))
             return []
 
         rows = []
@@ -1636,7 +1635,7 @@ class CloudRuAPIClient:
             if rows:
                 console.print(table)
             else:
-                console.print(Panel(f'No instance types found for region {region_key}.', title='Instance Types'))
+                Console().print(Panel.fit(f'No instance types found for region {region_key}.', title='Instance Types'))
 
         if return_data:
             return rows
@@ -1682,13 +1681,13 @@ class CloudRuAPIClient:
         if allocation_id is None:
             if not self._workspace_allocations_cache:
                 if show_table:
-                    console.print(Panel('No allocations found for current workspace.', title='Available Resources'))
+                    Console().print(Panel.fit('No allocations found for current workspace.', title='Available Resources'))
                 return {} if return_data else None
 
             allocation_ids = [allocation.get('id') for allocation in self._workspace_allocations_cache if allocation.get('id')]
             if not allocation_ids:
                 if show_table:
-                    console.print(Panel('No valid allocation IDs found in workspace.', title='Available Resources'))
+                    Console().print(Panel.fit('No valid allocation IDs found in workspace.', title='Available Resources'))
                 return {} if return_data else None
         else:
             allocation_ids = [self._resolve_allocation_selector(allocation_id)[0]]
@@ -1698,7 +1697,7 @@ class CloudRuAPIClient:
         for current_allocation_id in allocation_ids:
             if not current_allocation_id:
                 if show_table:
-                    console.print(Panel('Allocation ID is empty. Provide allocation_id explicitly.', title='Available Resources'))
+                    Console().print(Panel.fit('Allocation ID is empty. Provide allocation_id explicitly.', title='Available Resources'))
                 continue
 
             allocation_meta = allocation_meta_by_id.get(current_allocation_id, {})
@@ -1799,7 +1798,7 @@ class CloudRuAPIClient:
                     message = 'No rows to display.'
                     if only_available:
                         message = 'No currently available resources (all rows have available=0).'
-                    console.print(Panel(
+                    Console().print(Panel.fit(
                         message,
                         title=resources_title,
                     ))
@@ -1905,7 +1904,7 @@ class CloudRuAPIClient:
 
             console = Console(width=table_width)
             console.print(table)
-            console.print(Panel(totals_text, title=f'Used Resources Summary (Workspace: {workspace_label})'))
+            Console().print(Panel.fit(totals_text, title=f'Used Resources Summary (Workspace: {workspace_label})'))
 
         if return_data:
             return {
@@ -1998,7 +1997,7 @@ class CloudRuAPIClient:
             status_text.append("Error message: ", style="bold red")
             status_text.append(str(normalized['error_message']))
 
-            panel = Panel(status_text, title="Job Status")
+            panel = Panel.fit(status_text, title="Job Status")
             console.print(panel)
 
         if return_data:
@@ -2097,7 +2096,7 @@ class CloudRuAPIClient:
         console = console or Console()
 
         if not isinstance(result, dict) or not result.get('job_name'):
-            console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title='Job Delete Response'))
+            console.print(Panel.fit(json.dumps(result, ensure_ascii=False, indent=2), title='Job Delete Response'))
             return {
                 'recognized': False,
                 'ok': False,
@@ -2124,7 +2123,7 @@ class CloudRuAPIClient:
         status_text.append(f"{error_code}\n")
         status_text.append('Error message: ', style='bold red')
         status_text.append(error_message)
-        console.print(Panel(status_text, title='Job Delete Status'))
+        console.print(Panel.fit(status_text, title='Job Delete Status'))
 
         ok = str(error_code) in {'0', '0.0'} and status.lower() == 'deleted'
         return {
@@ -2146,13 +2145,13 @@ class CloudRuAPIClient:
         summary.append(str(deleted), style='green')
         summary.append(' | Failed: ', style='bold red')
         summary.append(str(len(failed)), style='red')
-        console.print(Panel(summary, title='Job Delete Summary'))
+        console.print(Panel.fit(summary, title='Job Delete Summary'))
 
         if failed:
             failed_text = Text()
             for job_id, err in failed:
                 failed_text.append(f"- {job_id}: {err}\n")
-            console.print(Panel(failed_text, title='Failed Deletes'))
+            console.print(Panel.fit(failed_text, title='Failed Deletes'))
 
     def render_submit_response(self, result, console=None):
         """Render submit response in rich format and return parsed outcome."""
@@ -2171,10 +2170,10 @@ class CloudRuAPIClient:
             info.append('Created: ', style='bold')
             info.append(created_str)
 
-            console.print(Panel(info, title='Job Submitted'))
+            console.print(Panel.fit(info, title='Job Submitted'))
             return {'recognized': True, 'job_id': str(result.get('job_name'))}
 
-        console.print(Panel(json.dumps(result, ensure_ascii=False, indent=2), title='Submit Response'))
+        console.print(Panel.fit(json.dumps(result, ensure_ascii=False, indent=2), title='Submit Response'))
         return {'recognized': False, 'job_id': None}
 
     @staticmethod
