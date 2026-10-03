@@ -51,7 +51,6 @@ from cloudru_storage import resolve_upload_config, upload_snapshot
 
 
 DEFAULT_SOURCE = "auto"
-VALID_SOURCES = ["auto", "instance_types_available", "allocations_instance_types_availability"]
 COST_GROUP_FIELDS = ["profile", "region", "n_gpus"]
 COST_DEFAULT_GROUP_BY = ["profile", "region"]
 
@@ -458,10 +457,10 @@ def _render_cost_report(report: dict, table_width: int) -> None:
 
     console = Console(width=table_width)
     console.print(table)
-    console.print(Panel(summary, title="Job Cost Total"))
+    Console().print(Panel.fit(summary, title="Job Cost Total"))
     if report["warnings"]:
         warning_text = Text("\n".join(f"- {warning}" for warning in report["warnings"]))
-        console.print(Panel(warning_text, title="Warnings"))
+        Console().print(Panel.fit(warning_text, title="Warnings"))
 
 
 def _load_job_document(path: str) -> dict:
@@ -608,7 +607,7 @@ def cmd_init(
     x_api_key: Optional[str] = typer.Option(None, "--x-api-key"),
     x_workspace_id: Optional[str] = typer.Option(None, "--x-workspace-id"),
     region: Optional[str] = typer.Option(None, "--region"),
-    source: Optional[str] = typer.Option(None, "--source", help="Resources source", case_sensitive=False),
+    source: Optional[str] = typer.Option(None, "--source", help="Resources source: auto, instance_types_available, allocation_instance_types", case_sensitive=False),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
     debug_mode = _resolve_debug(ctx, debug)
@@ -626,8 +625,7 @@ def cmd_init(
         if not init_client_id or not init_client_secret:
             raise RuntimeError("client_id and client_secret are required")
 
-        if init_source not in VALID_SOURCES:
-            raise RuntimeError(f"Invalid source '{init_source}'. Valid values: {', '.join(VALID_SOURCES)}")
+        CloudRuAPIClient.validate_resource_source(init_source)
 
         save_profile(
             profile=profile_name,
@@ -923,12 +921,12 @@ def cmd_allocations_workloads(
         _fail(exc, debug_mode)
 
 
-@allocations_app.command("show", help="Show allocation details")
-def cmd_allocations_show(
+@allocations_app.command("info", help="Show allocation details")
+def cmd_allocations_info(
     ctx: typer.Context,
     allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
     as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
-    table_width: int = typer.Option(160, "--table-width"),
+    table_width: int = typer.Option(160, "--table-width", min=1, help="Maximum table width, capped at terminal width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
@@ -947,8 +945,8 @@ def cmd_allocations_show(
         _fail(exc, debug_mode)
 
 
-@allocations_app.command("status", help="Show allocation resource status")
-def cmd_allocations_status(
+@allocations_app.command("resources", help="Show allocation resource status")
+def cmd_allocations_resources(
     ctx: typer.Context,
     allocation: Optional[str] = typer.Argument(None, help="Allocation UUID or exact name; default from profile", metavar="ALLOCATION"),
     as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON"),
@@ -959,7 +957,7 @@ def cmd_allocations_status(
     debug_mode = _resolve_debug(ctx, debug)
     try:
         client, cfg = _build_client(_resolve_profile(ctx, profile))
-        data = client.allocation_status(
+        data = client.allocation_resources(
             _resolve_allocation(allocation, cfg),
             table_width=table_width,
             return_data=as_json,
@@ -996,7 +994,7 @@ def cmd_available_resources(
     all_resources: bool = typer.Option(False, "--all", help="Show unavailable resources too"),
     refresh_workspace: bool = typer.Option(False, "--refresh-workspace"),
     table_width: int = typer.Option(160, "--table-width"),
-    source: Optional[str] = typer.Option(None, "--source", case_sensitive=False),
+    source: Optional[str] = typer.Option(None, "--source", help="auto, instance_types_available, allocation_instance_types", case_sensitive=False),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
@@ -1004,8 +1002,7 @@ def cmd_available_resources(
     try:
         client, cfg = _build_client(_resolve_profile(ctx, profile))
         effective_source = (source or cfg.get("source") or DEFAULT_SOURCE)
-        if effective_source not in VALID_SOURCES:
-            raise RuntimeError(f"Invalid source '{effective_source}'. Valid values: {', '.join(VALID_SOURCES)}")
+        CloudRuAPIClient.validate_resource_source(effective_source)
 
         client.available_resources(
             allocation_id=allocation_id,
@@ -1115,13 +1112,13 @@ def cmd_used_resources(
 
         console = Console(width=table_width)
         console.print(table)
-        console.print(Panel(totals_text, title="Used Resources Summary (All Profiles)"))
+        Console().print(Panel.fit(totals_text, title="Used Resources Summary (All Profiles)"))
 
         if failed_profiles:
             failed_text = Text()
             for profile_name, error in failed_profiles:
                 failed_text.append(f"- {profile_name}: {error}\n")
-            console.print(Panel(failed_text, title="Profiles with errors"))
+            Console().print(Panel.fit(failed_text, title="Profiles with errors"))
     except Exception as exc:
         _fail(exc, debug_mode)
 

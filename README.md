@@ -1,412 +1,425 @@
 # cloudru_utils
 
-Tools for working with Cloud.ru training/HPC jobs from CLI and Python.
+Submit and monitor Cloud.ru training jobs and inspect resources from the `cloudru`
+CLI or Python. You can use the tool on your computer or on a Cloud.ru machine.
 
-Disclaimer: This is an unofficial tool, not developed, supported, or endorsed by Cloud.ru.
+This is an unofficial tool, not developed, supported, or endorsed by Cloud.ru.
 
-At a glance:
-- `cloudru` CLI is built for day-to-day workflows: submitting jobs, monitoring jobs/status/logs, and checking available/used resources and instance types.
-- `CloudRuAPIClient` provides the same workflows programmatically and is especially convenient in IPython/Jupyter notebooks for exploratory work and live monitoring.
-- The toolkit uses Cloud.ru public API and can be used from any machine, not only Cloud.ru-hosted machines (with valid credentials/workspace headers).
-- Toolkit includes profile-based credentials, per-profile token cache, and mapping from available resources to submit-ready `instance_type` values.
+Start here: [Installation](#installation) · [CLI Quick Start](#cli-quick-start) ·
+[First job](#run-your-first-job) · [Run existing code](#run-code-already-available-for-the-job)
+
+More: [Snapshot jobs](#run-a-snapshot-job) · [Common tasks](#common-tasks) ·
+[Telegram bot](#optional-telegram-bot) · [Python API](#python-api) ·
+[Configuration](#configuration-and-reference)
 
 ## Installation
 
+Install Git and Python 3.9+. Use your existing Python environment, or optionally activate a virtual environment before installing.
+
 ```bash
+git clone https://github.com/yurakuratov/cloudru_utils.git
+cd cloudru_utils
 pip install -e .
+cloudru --version
 ```
 
-Check the installed version with `cloudru --version` (or `cloudru -v`).
-
-## Credentials and workspace
-
-The API credentials below are needed for Cloud.ru jobs/resources commands.
-Standalone `cloudru snapshot` commands do not require Cloud.ru API credentials.
-
-Cloud.ru API workflows need:
-- `client_id`
-- `client_secret`
-
-Most job endpoints also require workspace headers:
-- `x_api_key`
-- `x_workspace_id`
-
-How to get credentials:
-- API key guide: https://cloud.ru/docs/console_api/ug/topics/guides__api_key
-- Workspace profile/dev func guide: https://cloud.ru/docs/aicloud/mlspace/concepts/guides/guides__profile/profile__develop-func
-
-This toolkit works from local laptops/servers as well as Cloud.ru machines.
+Run the local example commands below from this repository's root directory.
 
 ## CLI Quick Start
 
+A workspace is the Cloud.ru environment where your jobs run. Get your
+[Cloud.ru access key](https://cloud.ru/docs/console_api/ug/topics/guides__api_key)
+and open your workspace's
+[Developer Parameters](https://cloud.ru/docs/aicloud/mlspace/concepts/guides/guides__profile/profile__develop-func).
+You will enter these values during setup:
+
+| Cloudru prompt | Value to enter |
+| --- | --- |
+| `client_id` | Cloud.ru Key ID |
+| `client_secret` | Cloud.ru Key Secret |
+| `x_api_key` | Workspace `x-api-key` |
+| `x_workspace_id` | Workspace `x-workspace-id` |
+
+Initialize the default profile, which stores your connection settings:
+
 ```bash
-# Initialize profile (stored in ~/.cloudru)
-cloudru init --profile default
-
-# Install shell completion (Typer)
-cloudru --install-completion
-
-# Check workspace and jobs
-cloudru workspace info
-cloudru workspace list
-cloudru allocations list
-cloudru jobs list
-
-# See currently available resources
-cloudru resources available
-
-# See currently used GPUs (running, pending, total)
-cloudru resources used
-
-# See most recently finished jobs
-cloudru jobs finished --n 20
+cloudru init
 ```
 
-## CLI Usage
+For `default region`, enter the region of the allocation you plan to use. An
+allocation is the pool of computing resources assigned to your jobs.
 
-Main commands:
+Verify workspace access and list its allocations:
 
 ```bash
 cloudru workspace info
-cloudru workspace list
 cloudru allocations list
-cloudru allocations use alloc-airi-master-jobs-h100-sr006
-cloudru allocations queue
-cloudru allocations workloads
-cloudru allocations status
-cloudru allocations show 00000000-0000-4000-8000-000000000000
-cloudru allocations show alloc-airi-master-jobs-h100-sr006
-cloudru allocations status alloc-airi-master-jobs-h100-sr006
-cloudru allocations status 00000000-0000-4000-8000-000000000000 --json
-cloudru allocations queue alloc-airi-master-jobs-h100-sr006
-cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --status Running --n 50
-cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --queue default --workspace-id <workspace-uuid>
-cloudru allocations queue alloc-airi-master-jobs-h100-sr006 --json
-cloudru allocations workloads alloc-airi-master-jobs-h100-sr006
-cloudru allocations workloads alloc-airi-master-jobs-h100-sr006 --type job
-cloudru allocations workloads alloc-airi-master-jobs-h100-sr006 --type notebook --json
-cloudru resources instance-types --region SR006
+```
+
+Initialization saves your settings; a successful workspace query confirms access.
+Replace `<ALLOCATION_NAME_OR_ID>` below with a name or ID from the allocation list:
+
+```bash
+cloudru allocations use <ALLOCATION_NAME_OR_ID>
 cloudru resources available
-cloudru resources available --all
-cloudru resources available --allocation ALLOCATION_ID_OR_NAME
-cloudru resources used
-cloudru resources used --region SR006 --n 2000
-cloudru resources used --all
-cloudru resources used --all --region SR006
-cloudru resources cost --since 30d
-cloudru resources cost --all --group-by profile,region,n_gpus
-cloudru resources cost --n-gpus 1 --json
-cloudru jobs list
-cloudru jobs list --n 20 --status Running,Pending
-cloudru jobs list --allocation-name alloc-airi-master-jobs-h100-sr006
-cloudru jobs finished --n 20
-cloudru jobs finished --status Completed,Succeeded --n 20
+```
+
+The selected allocation and its region are saved for later submissions. In the
+resource report, find that allocation and copy an available `instance_type` value
+for your first job.
+
+## Run your first job
+
+Create a local file named `job.yaml` with the following content. Replace
+`REPLACE_WITH_INSTANCE_TYPE` with the value you selected above. Check that the
+example image is available in your workspace, or choose an image that provides Python.
+
+```yaml
+job:
+  script: python --version
+  base_image: cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40
+  instance_type: REPLACE_WITH_INSTANCE_TYPE
+  job_type: binary
+  n_workers: 1
+  processes_per_worker: 1
+  job_desc: first-job
+```
+
+This uses the allocation and region saved in [CLI Quick Start](#cli-quick-start).
+Preview the configuration and command:
+
+```bash
 cloudru jobs submit -f job.yaml --dry-run
-cloudru jobs submit -f job.yaml --job-desc "exp-001" --env WANDB_MODE=offline
-cloudru jobs submit -f job.yaml --allocation-name alloc-airi-master-jobs-h100-sr006
-cloudru jobs submit -f job.yaml --pre-command "export WANDB_MODE=offline"
-cloudru jobs submit -f job.yaml --json
-cloudru jobs submit -f job.yaml --retry
-cloudru jobs submit -f job.yaml --retry --retry-interval 60 --retry-timeout 2h
-cloudru jobs status lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-cloudru jobs logs lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tail 50
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key --dry-run
-cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --alias cloudru-training
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- nvidia-smi
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- python train.py --epochs 3
-cloudru jobs kill lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-cloudru jobs kill lm-mpi-job-xxxx lm-mpi-job-yyyy --yes
-cloudru snapshot . --upload --exclude data --exclude runs
-cloudru bot run
 ```
 
-Example `job.yaml` for CLI submit (setup + run are submitted as one job command):
+This preview may authenticate with Cloud.ru. Fix any reported errors, then submit:
+
+```bash
+cloudru jobs submit -f job.yaml
+```
+
+Submission starts a job using the selected resources. It prints a `Job ID` and
+ready-to-use status and log commands. Replace `<JOB_ID>` with that printed value:
+
+```bash
+cloudru jobs status <JOB_ID>
+cloudru jobs logs <JOB_ID>
+```
+
+A successful run prints the Python version in its logs.
+
+## Run code already available for the job
+
+Script paths refer to files inside the image or on storage mounted into the job.
+For this example, make sure a checkout of this repository is available at
+`/home/jovyan/my-user/cloudru_utils` inside the job, in the selected region.
+Replace that path with your actual checkout location.
+
+The `setup` section prepares the job before your script runs. Use it to select a
+Python environment, run preparation commands, and choose the working directory.
+Here, `workdir` sets the directory from which the script runs:
+
+Update `job.yaml`, keeping the image and instance type you used for the first job:
 
 ```yaml
 setup:
-  # commands are executed in this order:
-  # shell_init -> conda_env -> pre_command -> check_hf_auth -> workdir -> print_pwd -> job.script
-  # optional; if omitted and conda_env is set, CLI uses: eval "$(conda shell.bash hook)"
-  shell_init: 'eval "$(conda shell.bash hook)"'
-  conda_env: "/home/jovyan/your/env"
-  workdir: "/home/jovyan/project"
-  check_hf_auth: true
-  print_pwd: true
-  pre_command:
-    - nvidia-smi
-
+  workdir: /home/jovyan/my-user/cloudru_utils
 job:
-  script: "./scripts/run.sh"
-  base_image: "cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40"
-  instance_type: "a100plus.1gpu.80vG.12C.96G"
-  region: "SR006"
-  # allocation_name: "alloc-airi-master-jobs-h100-sr006"  # optional; saved profile default, then Cloud.ru default
-  job_type: "binary"
-  job_desc: "quick run"
+  script: bash examples/example.sh
+  base_image: cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40
+  instance_type: REPLACE_WITH_INSTANCE_TYPE
+  job_type: binary
   n_workers: 1
   processes_per_worker: 1
-  env_variables:
-    HF_HOME: "/home/jovyan/data/.cache/huggingface"
+  job_desc: example-script
 ```
 
-### `setup` behavior for non-snapshot jobs
+Use the [preview, submit, and monitor commands above](#run-your-first-job).
+The script creates `results/result.txt` under the remote working directory and
+prints `Saved results/result.txt` in its logs.
 
-For YAML without `snapshot`, `setup` is optional. When present, setup steps and `job.script` are executed as one submitted job command. Both snapshot and non-snapshot jobs support `setup`; snapshot jobs use the ordering described below to initialize the environment before downloading source.
+By default, the script uses Python from the job image. To select an existing Conda
+environment and check which Python will run, expand the same `setup` section:
 
-Execution order:
-1. `setup.shell_init`
-2. `setup.conda_env` activation
-3. `setup.pre_command` (string or list, in order)
-4. `setup.check_hf_auth` (`hf auth whoami`)
-5. `setup.workdir` (`cd ...`)
-6. `setup.print_pwd` (`echo "Current directory: $(pwd)"`)
-7. `job.script`
+```yaml
+setup:
+  conda_env: /home/jovyan/my-user/envs/training
+  pre_command:
+    - which python
+    - python --version
+  workdir: /home/jovyan/my-user/cloudru_utils
+  print_pwd: true
+```
 
-Notes:
-- `print_pwd` default is `false`.
-- If `setup` is empty (and no setup CLI overrides), setup section is not used and `job.script` is submitted unchanged.
-- `cloudru jobs submit --dry-run` shows:
-  - merged payload with raw `job.script`
-  - `Command to run:` with the exact final command sent to API.
-- Full example with all setup fields: `examples/job.yaml`.
+Replace the environment path with one available inside the job. Its Python and
+installed packages are then used by the preparation commands and your script.
+`print_pwd` shows the working directory in the logs.
 
-Useful `setup.pre_command` examples:
-- `nvidia-smi`
-- `which python`
-- `python -V`
-- `ln -s PATH_TO_DATA /home/user/project/data`
-- `python -c "import torch; assert torch.cuda.is_available(), 'CUDA is not available'"`
+Setup steps run in this order, regardless of their order in YAML. Optional steps
+run when configured:
 
-Use `job.env_variables` for static environment variables, and `setup.pre_command` for preparatory shell checks/actions.
+| Order | Setting | What it does |
+| --- | --- | --- |
+| 1 | `setup.shell_init` | Initializes the shell, for example to make Conda available. |
+| 2 | `setup.conda_env` | Activates your Python environment. |
+| 3 | `setup.pre_command` | Runs preparation commands, in the order listed. |
+| 4 | `setup.check_hf_auth` | Checks Hugging Face login with `hf auth whoami` when set to `true`. |
+| 5 | `setup.workdir` | Changes to your project directory. |
+| 6 | `setup.print_pwd` | Prints that directory when set to `true`. |
+| 7 | `job.script` | Runs your command. |
 
-Config files:
-- `~/.cloudru/credentials` - `client_id`, `client_secret`, `x_api_key`, `x_workspace_id`
-- `~/.cloudru/config` - defaults like `region`, `source`, `default_allocation`, `default_allocation_region`
-- `~/.cloudru/token_cache` - cached access token per profile
+Cloudru initializes Conda automatically when `conda_env` is set. Use `shell_init`
+if your environment needs custom initialization. Preparation commands run before
+the directory change, so use absolute paths for project files in `pre_command`.
+Each step must succeed before the next one runs.
 
-Profile selection:
-- `--profile`
-- `CLOUDRU_PROFILE`
+Use `--dry-run` to inspect the generated command. The
+[full job example](examples/job.yaml) provides more settings; check its paths and
+environment before using it.
 
-### Waiting for free GPUs
+## Run a snapshot job
 
-Add `--retry` to try again every 60 seconds when submission fails with
-`PROJECT_GPU_LIMIT_REACHED_ONLY_<N>_FREE`. It stops when the job is accepted,
-another error occurs, or you press Ctrl+C. Without `--retry`, it tries once.
+A snapshot is a package of your local code. Cloudru uploads it to S3, starts a job,
+and downloads the code before running your command. This example also uploads the
+results to S3 through automatic output collection.
 
-Use `--retry-interval 30` to change the delay to 30 seconds, or
-`--retry-timeout 2h` to stop trying after two hours. Both require `--retry`.
-Timeouts accept `s`, `m`, `h`, or `d` and start after preparation and upload;
-a request already in progress may finish later. There is no timeout by default.
+The source can be a directory, a single file, or a local Git repository. For sources
+inside a Git repository, `.gitignore` rules apply to untracked files by default.
 
-Snapshots are created and uploaded once, and local archives are kept on failure.
-Progress goes to stderr, so `--json` still produces one final response.
-`--dry-run` never submits or waits. This flag does not restart failed jobs or
-change `job.max_retry`.
+Complete [CLI Quick Start](#cli-quick-start) before continuing.
 
-### Allocations
+### 1. Prepare S3 access
 
-Choose an allocation once to avoid typing its name every time:
+Your computer uploads the source package. The job downloads it and uploads results.
+Both need AWS CLI and its configuration and credentials files. Install
+[AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+and get [Object Storage credentials](https://cloud.ru/docs/s3e/ug/topics/api__api-key)
+with access to your bucket.
+
+On your computer, configure the default AWS profile:
 
 ```bash
-cloudru allocations list
-cloudru allocations use alloc-airi-master-jobs-h100-sr006
+aws configure
 ```
 
-The default is saved for your profile in `~/.cloudru/config`.
+For the example's `https://s3.cloud.ru` endpoint, enter these values as described in
+[Cloud.ru's AWS CLI setup guide](https://cloud.ru/docs/s3e/ug/topics/tools__aws-cli):
 
-| Command | What it shows |
+| AWS prompt | Value |
 | --- | --- |
-| `cloudru allocations queue` | Running and waiting jobs across workspaces; requires custom queues |
-| `cloudru allocations workloads` | Jobs and notebooks assigned to nodes; also works without custom queues |
-| `cloudru allocations status` | Resource usage and availability |
-| `cloudru allocations show` | Allocation details |
+| AWS Access Key ID | `<tenant_id>:<key_id>` from your Object Storage credentials |
+| AWS Secret Access Key | The corresponding Key Secret |
+| Default region name | `ru-central-1` |
+| Default output format | `json` |
 
-Common filters and a one-off allocation override:
+This creates `~/.aws/config` and `~/.aws/credentials`. In the example YAML, uncomment
+`profile: default` under `s3.local` to select the local profile explicitly:
 
-```bash
-cloudru allocations queue --status Pending
-cloudru allocations workloads --type notebook
-cloudru allocations queue alloc-airi-master-jobs-h100-sr006
-cloudru allocations workloads alloc-airi-master-jobs-h100-sr006
+```yaml
+s3:
+  # Keep the other S3 settings in the example.
+  local:
+    profile: default
 ```
 
-Submissions also use the saved allocation when CLI/YAML omits one. If the job
-also omits its region, the saved allocation's region is used.
+If `aws_profile` is already set in `~/.cloudru/config`, you can remove the whole
+`s3.local` block instead. Do not leave it empty.
 
-Run `cloudru allocations use` to see your default, or add `--clear` to remove it.
-Use `--help` on any command for more options.
+For the job, prepare these files on storage mounted at the path set by
+`job.env_variables.HOME`: `<HOME>/.aws/config` and `<HOME>/.aws/credentials`.
+For example, run `aws configure` in a notebook that shares this storage, using that
+home directory and the default profile. The files must be visible at those paths
+inside the job; they are **not copied from your computer**.
+The job needs access to read the source package and write results in your bucket.
 
-### Report job costs
+The job image must provide Bash and AWS CLI when it starts, before environment
+activation. The job's Python environment must provide Python 3.9 or newer.
 
-`cloudru resources cost` aggregates the job cost reported by the Cloud.ru jobs API. It queries the selected profile's default region and includes jobs created within the last 30 days.
+If you need a named AWS profile, use `--aws-profile NAME` or `s3.local.profile`
+locally, and `job.env_variables.AWS_PROFILE` inside the job.
 
-```bash
-# Default profile and its configured region, grouped by profile and region
-cloudru resources cost --since 30d
+### 2. Configure the existing example
 
-# All configured profiles with an explicit grouping order
-cloudru resources cost --all --group-by profile,region,n_gpus
+Edit [examples/snapshot-job-example.yaml](examples/snapshot-job-example.yaml).
+Check these values before submitting:
 
-# Filter by allocated GPU count
-cloudru resources cost --n-gpus 1
+| Setting | What to check or replace |
+| --- | --- |
+| `s3.endpoint_url` | Your S3 endpoint, such as `https://s3.cloud.ru`. |
+| `s3.snapshot_prefix`, `s3.collect_outputs_to` | Replace `my-bucket/my-user` with your bucket and folder. Keep `${CLOUDRU_JOB_DIR_NAME}` in the output path. |
+| `job.env_variables.HOME` | Your absolute home path inside the job, where the AWS files are available. |
+| `job.base_image`, `job.instance_type`, `job.region` | An image and resources available in your workspace. |
+| `job.allocation_name` | Your allocation, or omit it if you have selected a default with `cloudru allocations use`. |
 
-# Query one or more explicit regions and emit machine-readable output
-cloudru resources cost --region SR003 --region SR006 --json
-```
+The example packages the current directory, excluding data and generated files.
+It runs `bash examples/example.sh`, which creates `results/result.txt`.
+`outputs` selects the directories to upload; `s3.collect_outputs_to` gives each job a separate S3 folder.
 
-`--since` accepts positive minute, hour, day, and week durations such as `30m`, `12h`, `30d`, and `4w`. It filters by job creation time in UTC. Grouping supports `profile`, `region`, and `n_gpus`; when omitted, grouping defaults to `profile,region`. With `--all`, each profile uses its own configured region unless `--region` overrides it for every profile.
+### 3. Submit and monitor
 
-Regions whose matching jobs have a total reported cost of zero are omitted completely, including their job and GPU-hour counts. Running jobs use their current accrued cost and duration from the API.
-
-The value is the cost reported for training jobs, without an assumed currency symbol. It is not a complete project invoice and may not represent continuous allocation billing.
-
-### Connect to a running job over SSH
-
-`cloudru jobs ssh` connects to rank 0 (the master pod) by default. Use `--rank N` to connect to another rank; rank 1 maps to `mpiworker-0`, rank 2 to `mpiworker-1`, and so on.
-
-```bash
-# Use ssh-agent or OpenSSH's default identities
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-
-# Use an explicit private key
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key
-
-# Connect to the first worker pod
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key
-
-# Resolve and print the exact command without starting SSH
-cloudru jobs ssh lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -i ~/.ssh/private_id_rsa_key --dry-run
-```
-
-The job must be in `Running` status. The CLI obtains the workspace namespace and region-specific SSH gateway from Cloud.ru, then starts the local OpenSSH client interactively.
-
-A matching private-key identity is always required. You may supply its file with `-i`, load it into `ssh-agent`, or make it available through OpenSSH's default identity paths.
-
-### Generate an SSH config entry
-
-`cloudru jobs ssh-config` prints an OpenSSH config block that can be pasted into `~/.ssh/config` and used by VS Code Remote SSH. It does not modify any files.
+Replace `<JOB_ID>` with the `Job ID` printed after submission.
 
 ```bash
-# Generate a friendly entry for the master pod using ssh-agent/default identities
-cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --alias cloudru-training
-
-# Include an explicit private key
-cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --alias cloudru-training -i ~/.ssh/private_id_rsa_key
-
-# Generate an entry for the first worker
-cloudru jobs ssh-config lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 --alias cloudru-worker
+cloudru jobs submit -f examples/snapshot-job-example.yaml --dry-run
+cloudru jobs submit -f examples/snapshot-job-example.yaml
+cloudru jobs status <JOB_ID>
+cloudru jobs logs <JOB_ID>
 ```
 
-When `--alias` is omitted, the generated alias is `cloudru-<last-8-job-id-characters>-r<rank>`. When `-i` is omitted, the output contains commented guidance showing how to configure the required identity. Paste the block into `~/.ssh/config`, then run `ssh cloudru-training` or select `cloudru-training` in VS Code Remote SSH.
+Dry-run checks local configuration and previews the job. Remote credentials and
+the image are checked when the job runs. Fix any preview errors before submitting.
 
-### Execute a command on a running job
+In the logs, look for `Saved results/result.txt` to confirm the example script wrote its result.
 
-`cloudru jobs exec` uses the same SSH target resolution as `cloudru jobs ssh`, but runs one command and returns its exit status. Put `--` before the remote command so arguments beginning with `-` are not interpreted as Cloud.ru CLI options.
+### 4. Find the results
+
+After `cloudru jobs submit`, find the `Collect outputs to` line in your terminal.
+For example:
+
+```text
+Collect outputs to: s3://my-bucket/my-user/outputs/cloudru_utils-20261003-120000-ab12cd34ef56-1234-7f2a
+```
+
+Copy the final folder name after `outputs/` into `JOB_FOLDER`; the value below
+matches the example above. Use the folder from your own submission.
+
+After the job finishes, download all its outputs into a local folder. Replace the
+bucket and endpoint with your settings. This uses your default AWS profile:
 
 ```bash
-# Run a command on the master pod
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- nvidia-smi
-
-# Pass arguments to a command
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- python train.py --epochs 3
-
-# Run on the first worker with an explicit private key
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --rank 1 -i ~/.ssh/private_id_rsa_key -- nvidia-smi
-
-# Allocate a pseudo-terminal for a command that needs one
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --tty -- top
-
-# Preview the exact SSH command
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --dry-run -- nvidia-smi
-
-# Shell syntax is explicit
-cloudru jobs exec lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -- bash -lc 'nvidia-smi | grep A100'
+JOB_FOLDER='cloudru_utils-20261003-120000-ab12cd34ef56-1234-7f2a'
+aws s3 cp --recursive "s3://my-bucket/my-user/outputs/$JOB_FOLDER/" "./$JOB_FOLDER/" --endpoint-url https://s3.cloud.ru
 ```
 
-Command tokens are safely quoted before being passed to the remote shell, so arguments containing spaces are preserved. Use `bash -lc`, as shown above, when you need pipes, redirects, variable expansion, `cd`, or multiple commands.
+The example result is now at `./$JOB_FOLDER/results/result.txt`.
 
-## Source snapshots
+Collection runs after the script exits, including when it fails. Missing directories
+are skipped. Resources remain allocated until uploads finish.
 
-```bash
-cloudru snapshot . --exclude data --exclude runs
-cloudru snapshot . --upload
+### Optional: use an existing Python environment
+
+Set `conda_env` in the example's existing `setup` section:
+
+```yaml
+setup:
+  conda_env: /home/jovyan/my-user/envs/training
 ```
 
-Creates one `.tar.gz` from a directory or file. Defaults: `./snapshots`, a 1 GiB
-source limit, and Git ignores for untracked files. The output directory is
-excluded automatically when inside the source. Local creation needs no AWS or
-Cloud.ru credentials; Git is required for Git sources.
+Use an environment already available inside the job. See the startup reference
+below if your image needs shell initialization to make Conda available.
 
-For uploads, install AWS CLI and configure a named static-credential profile
-(e.g. `aws configure --profile research`) with access to your S3 bucket.
-Both `~/.aws/config` and `~/.aws/credentials` must exist. Add your upload settings
-to `~/.cloudru/config`, replacing the example values:
+### Optional: link shared data or output directories
+
+A symlink lets the script use a directory on shared storage through a local path.
+The target directories must be accessible inside the job.
+
+Add these variables to the existing `job.env_variables` section, keeping `HOME`
+and the other settings:
+
+```yaml
+job:
+  env_variables:
+    JOBS_DATA_DIR: /home/jovyan/my-user/data/my-dataset
+    JOBS_RESULTS_DIR: /home/jovyan/my-user/shared-results
+```
+
+Append these commands to the existing `setup.pre_command` list:
+
+```yaml
+setup:
+  pre_command:
+    - 'test -d "$JOBS_DATA_DIR"'
+    - 'mkdir -p "$JOBS_RESULTS_DIR"'
+    - 'ln -sT "$JOBS_DATA_DIR" "$CLOUDRU_SOURCE_DIR/data"'
+    - 'ln -sT "$JOBS_RESULTS_DIR" "$CLOUDRU_SOURCE_DIR/results"'
+```
+
+This checks that the dataset exists and creates the output directory if needed.
+`ln -sT` refuses to overwrite an existing path. Keep `data` and `results` in
+`snapshot.exclude`, as in the example, so these link paths are free after extraction.
+
+If several jobs write through symlinks to the same output directory, do not use
+automatic output collection for that directory. It can upload files from other jobs
+while they are still being written.
+
+What matters is the shared target directory, not the link name: collection follows
+symlinks. Remove that directory from `outputs`, or turn collection off as shown below.
+
+### Optional: turn off automatic output collection
+
+Remove `outputs` and the unused `s3.collect_outputs_to` setting. Keep the other S3
+settings needed to transfer the source code.
+
+Results stay where the script writes them, including shared storage reached through
+a symlink. Download or manage those files yourself when needed.
+
+### Snapshot job reference
+
+<details>
+<summary>Reuse a snapshot; exclusions and size limits</summary>
+
+Choose exactly one mode in `snapshot`:
+
+| Field | Behavior |
+| --- | --- |
+| `source: .` | Package the current directory and upload it. |
+| `archive: ./snapshots/project.tar.gz` | Validate and upload an existing Cloudru snapshot. |
+| `uri: s3://my-bucket/my-user/snapshots/project.tar.gz` | Download an existing snapshot inside the job. No local AWS setup or upload prefix is needed. |
+
+For `source`, options are `output_dir` (default `./snapshots`), `use_gitignore`
+(default `true`, applied to untracked files), `exclude` (patterns), `exclude_from`
+(pattern file), and `max_bytes` (default `1073741824`, or 1 GiB). The output directory
+is excluded automatically when inside the source. Git is required for Git sources.
+These capture options do not apply to `archive` or `uri`.
+
+Each source submission captures a new snapshot. To retry uploading an existing
+archive, reuse `snapshot.archive` or use `aws s3 cp`; copying to the same S3 key
+replaces the object.
+
+</details>
+
+<details>
+<summary>Configuration overrides and path rules</summary>
+
+Snapshot storage and local AWS settings resolve in this order: CLI options, YAML,
+selected Cloud.ru profile, then defaults. You can save defaults in `~/.cloudru/config`:
 
 ```ini
 [default]
 s3_snapshot_prefix = s3://my-bucket/my-user/snapshots
 s3_endpoint_url = https://s3.cloud.ru
-aws_profile = research
+aws_profile = default
 ```
 
-`--profile NAME` (or `CLOUDRU_PROFILE`) selects the Cloud.ru config section.
-Override these settings with `--s3-prefix`, `--s3-endpoint-url`, and `--aws-profile`.
-Optional config keys `aws_cli`, `aws_config_file`, and `aws_credentials_file`
-override the executable and standard AWS file paths; matching CLI flags use hyphens.
-Each invocation captures a new snapshot. To upload or retry an existing archive,
-use `aws s3 cp` with your AWS profile and endpoint; copying to the same S3 key replaces it.
+`--profile NAME` or `CLOUDRU_PROFILE` selects the Cloud.ru section; this is separate
+from the AWS profile. Optional profile keys `aws_cli`, `aws_config_file`, and
+`aws_credentials_file` override the AWS executable and file locations. In YAML,
+these are `s3.local.aws_cli`, `s3.local.config_file`, and `s3.local.credentials_file`.
+Both AWS files must exist. The credentials file must contain the selected profile
+with an access key and secret key (and an optional session token).
 
-Use `--dry-run` to validate without creating or uploading files, `--json` for
-structured output, and `cloudru snapshot --help` for selection and size options.
-This standalone command remains independent of job submission. Managed submit
-can also capture source or reuse an existing snapshot, as described below.
+Submit overrides are `--snapshot-s3-prefix`, `--s3-endpoint-url`, `--aws-profile`,
+`--aws-cli`, `--aws-config-file`, and `--aws-credentials-file`. Explicit
+`--use-gitignore` / `--no-use-gitignore` overrides YAML for source capture.
 
-## Submit a snapshot-backed job
+Relative local paths resolve from your terminal's current directory, not the YAML
+file's location. This includes source, archive, output, exclusion-file, and AWS
+paths. Local `~` expands on your computer.
 
-Add `snapshot` to job YAML to capture or reuse a source package, deliver it through
-S3, and extract it before remote setup and execution. Start with the
-[runnable smoke-job template](examples/snapshot-job-example.yaml), replacing its bucket,
-AWS profiles, remote HOME, image, and instance type for your workspace:
+`outputs` takes absolute directory paths with distinct final names. Job environment
+variables can be used in these paths and `s3.collect_outputs_to`. Each directory is
+uploaded under its final name (for example, `results/`). Files remain on the job's
+storage after collection. Use `--collect-outputs-to` to override the S3 destination
+and `--dry-run` to preview the paths.
 
-```bash
-# Validate and preview without authentication, writes, network, or submission.
-# Update snapshot-job-example.yaml with corrected paths and aws setting.
-cloudru jobs submit -f examples/snapshot-job-example.yaml --dry-run
-```
+</details>
 
-Choose exactly one snapshot mode:
+<details>
+<summary>Remote settings and startup order</summary>
 
-| YAML field | Behavior |
-| --- | --- |
-| `snapshot.source` | Capture a directory/file and upload before submission. |
-| `snapshot.archive` | Validate and upload an existing local snapshot package. |
-| `snapshot.uri` | Download an existing `s3://` package remotely; no local capture/upload. |
-
-Source mode accepts `output_dir` (default `./snapshots`), `use_gitignore` (default
-`true`), `exclude` (pattern list), `exclude_from` (pattern file), and `max_bytes`
-(default `1073741824`, or 1 GiB). Submit's `--use-gitignore` /
-`--no-use-gitignore` overrides YAML only when explicitly supplied. Capture options
-do not apply to archive/URI reuse.
-
-For snapshot transfers, `s3` accepts `endpoint_url`, `snapshot_prefix`, and `local` settings `aws_cli`,
-`profile`, `config_file`, and `credentials_file`. Snapshot storage and local AWS
-settings resolve as CLI > YAML > selected Cloud.ru profile > defaults. The
-profile keys are the same as for standalone snapshots above. Local overrides are
-`--snapshot-s3-prefix`, `--s3-endpoint-url`, `--aws-cli`, `--aws-profile`,
-`--aws-config-file`, and `--aws-credentials-file`; standalone snapshot keeps
-`--s3-prefix`. Relative local paths resolve from the terminal's current directory,
-including source, archive, output directory, exclusion file, and local AWS file/executable
-paths. The location of the YAML file does not change their meaning. Local `~`
-expands on the submitting machine. URI mode requires no local AWS
-installation/files or upload prefix.
-
-Managed jobs require an absolute remote `HOME` in `job.env_variables` (or
-`--env` overrides). `AWS_PROFILE` is optional and defaults to `default`, selecting
-`[default]` in the remote AWS files. Remote defaults are:
+Remote settings come from `job.env_variables`, `--env` overrides, and these defaults.
+`HOME` is required and must be an absolute path. Explicit remote file and directory
+paths must also be absolute.
 
 | Variable | Default |
 | --- | --- |
@@ -414,84 +427,276 @@ Managed jobs require an absolute remote `HOME` in `job.env_variables` (or
 | `CLOUDRU_JOBS_ROOT` | `<HOME>/data/jobs` |
 | `AWS_CONFIG_FILE` | `<HOME>/.aws/config` |
 | `AWS_SHARED_CREDENTIALS_FILE` | `<HOME>/.aws/credentials` |
-| `CLOUDRU_AWS_CLI` | `aws` in the remote startup PATH |
+| `CLOUDRU_AWS_CLI` | `aws` in the startup PATH |
 
-Remote settings come only from `--env`, YAML environment variables, and these
-defaults. AWS files must already exist remotely, with the selected static-credential
-profile; credential files are not copied from the submitting machine. The image
-must provide Bash and AWS CLI before activation. The bootstrap applies the remote
-environment and resolves AWS to an absolute path, then runs `setup.shell_init`
-and activates `setup.conda_env`. It uses `python` (or `python3` if `python` is absent)
-from the resulting PATH and requires version 3.9+.
+Cloudru sets four reserved variables: `CLOUDRU_JOB_DIR_NAME`, `CLOUDRU_JOB_DIR`,
+`CLOUDRU_SOURCE_DIR`, and `CLOUDRU_SNAPSHOT_URI`. The job folder name combines the
+sanitized snapshot name and a four-digit hexadecimal suffix. Source extracts into
+`<CLOUDRU_JOBS_ROOT>/<CLOUDRU_JOB_DIR_NAME>/source`. An existing job directory is
+rejected.
 
-Four generated variables are reserved: `CLOUDRU_JOB_DIR_NAME`, `CLOUDRU_JOB_DIR`,
-`CLOUDRU_SOURCE_DIR`, and `CLOUDRU_SNAPSHOT_URI`. `CLOUDRU_JOB_DIR_NAME` is
-`<sanitized-snapshot-basename>-<4hex>`; the job directory is
-`<CLOUDRU_JOBS_ROOT>/<CLOUDRU_JOB_DIR_NAME>`. Source
-extracts into `<CLOUDRU_JOB_DIR>/source`. The bootstrap refuses an existing job
-directory.
+Startup runs in this order:
 
-Execution order is remote context → resolve AWS → shell initialization
-→ conda activation → download/validate/extract → `setup.pre_command` → optional HF auth check → working-directory
-change → prepared diagnostics → `job.script` → optional output collection. The default working directory is
-`${CLOUDRU_SOURCE_DIR}`. Pre-commands run before that change, so use
-`$CLOUDRU_SOURCE_DIR` when preparing source paths. Scripts choose and create their
-own output directories. Initialization and activation run once and must work before
-snapshot files exist; put source-dependent preparation in `setup.pre_command`.
+1. Apply remote settings and locate AWS CLI.
+2. Run `setup.shell_init`, then activate `setup.conda_env` if set.
+3. Download, validate, and extract the snapshot.
+4. Run `setup.pre_command`, then the optional Hugging Face authentication check.
+5. Change to `setup.workdir` (default: `$CLOUDRU_SOURCE_DIR`) and record diagnostics.
+6. Run `job.script`, then collect outputs if enabled.
 
-For snapshot jobs, `job.conda_env` translates into setup and is omitted from the
-API payload, so the Bash bootstrap controls activation before starting Python. Nonempty
-`job.flags` is rejected; put command arguments directly in `job.script` so they
-apply to the experiment rather than the outer bootstrap wrapper.
+If needed, set `setup.shell_init` to `eval "$(conda shell.bash hook)"`. Initialization
+and activation run once, before the snapshot is available. Put commands that need
+source files in `setup.pre_command`; use `$CLOUDRU_SOURCE_DIR` because these commands
+run before the working-directory change. Python is selected after activation:
+`python`, or `python3` if `python` is absent, with version 3.9 or newer.
 
-`.cloudru/` stores resolved configuration (`config.yaml`), package and system details
-(`packages.txt`, `system.txt`), full environments after activation and preparation
-(`environment.startup.json`, `environment.prepared.json`), and execution status
-(`status.json`). Environment captures may contain secrets. Directories use mode
-`0700`, diagnostic files `0600`; optional diagnostic failures do not stop training.
-Console logs remain in Cloud.ru.
+For snapshot jobs, `job.conda_env` also activates through setup and is omitted from
+the API payload. Put command arguments in `job.script`; nonempty `job.flags` is
+unsupported.
 
-Managed execution supports one binary job with one worker and one process per
-worker, without automatic retries. No local job mapping or submission receipt is created. Managed
-snapshots require the bootstrap; `--no-bootstrap` is unsupported for them. Non-snapshot
-jobs retain their own setup and submission behavior. See the
-[snapshot job example](examples/snapshot-job-example.yaml) for configuration.
+</details>
 
-### Collect outputs to S3
+<details>
+<summary>Diagnostics and supported jobs</summary>
 
-Snapshot jobs can copy selected directories to S3 after the experiment exits:
+`<CLOUDRU_JOB_DIR>/.cloudru/` contains the resolved `config.yaml`, `packages.txt`,
+`system.txt`, `environment.startup.json`, `environment.prepared.json`, and
+`status.json`. Environment captures may contain secrets. Job directories use mode
+`0700` and diagnostic files `0600`. Optional diagnostic failures do not stop the
+script. Console logs remain in Cloud.ru.
 
-```yaml
-snapshot:
-  source: .
-s3:
-  # Keep your existing endpoint and snapshot upload settings.
-  collect_outputs_to: 's3://my-bucket/my-user/outputs/${CLOUDRU_JOB_DIR_NAME}'
-outputs:
-  - '${CLOUDRU_SOURCE_DIR}/runs'
-  - '${CLOUDRU_JOB_DIR}/checkpoints'
-# Keep your existing job and setup sections.
+Snapshot jobs support one binary job, one worker, and one process per worker.
+The startup wrapper is required; `--no-bootstrap` is unsupported.
+
+</details>
+
+### Create a snapshot without submitting a job
+
+This is optional: snapshot jobs create the package during submission. To create a
+local `.tar.gz` package separately:
+
+```bash
+cloudru snapshot . --exclude data --exclude runs --exclude results --dry-run
+cloudru snapshot . --exclude data --exclude runs --exclude results
 ```
 
-Set the S3 destination in `s3.collect_outputs_to` and list absolute directory paths
-under `outputs`. Job environment variables work in both fields. The example uploads
-to `runs/` and `checkpoints/` beneath a separate S3 folder for each job. Directory
-names must be distinct; symlinks are followed.
+The package is saved in `./snapshots`. To create and upload a new snapshot using the
+local S3 defaults from the reference above:
 
-Uploads run after training finishes, even if training fails. Missing directories
-are skipped, and files remain on NFS. Submission returns immediately; the job stays
-allocated until uploads finish. Remove `outputs` section from yaml to disable collection.
+```bash
+cloudru snapshot . --exclude data --exclude runs --exclude results --upload
+```
 
-Use `--dry-run` to preview source and destination paths, or `--collect-outputs-to`
-to override the destination.
+The standalone command uses `--s3-prefix` instead of submit's `--snapshot-s3-prefix`.
+Use `--dry-run` to preview without creating or uploading files, `--json` for structured
+output, or `cloudru snapshot --help` for all options.
 
+## Common tasks
 
-## Telegram Bot (local run)
+Use the `Job ID` printed by submission or shown by `cloudru jobs list` wherever
+`<JOB_ID>` appears below. Use `--help` on any command for its full options.
 
-You can run a local Telegram bot process that monitors all configured profiles and sends notifications
-when job statuses change (poll interval default is 60s).
+### Monitor and stop jobs
 
-Configure bot settings in a dedicated file `~/.cloudru/telegram.ini`:
+```bash
+cloudru jobs list
+```
+
+| Task | Command |
+| --- | --- |
+| Inspect one job | `cloudru jobs status <JOB_ID>` |
+| Read its latest log lines | `cloudru jobs logs <JOB_ID> --tail 50` |
+| See recent finished jobs | `cloudru jobs finished --n 20` |
+| Stop and delete a job | `cloudru jobs kill <JOB_ID>` |
+
+<details>
+<summary>Job filters and multiple deletions</summary>
+
+Replace `<ALLOCATION_NAME>` with a name from `cloudru allocations list`.
+
+```bash
+cloudru jobs list --n 20 --status Running,Pending
+cloudru jobs list --allocation-name <ALLOCATION_NAME>
+cloudru jobs finished --status Completed,Succeeded --n 20
+```
+
+`cloudru jobs kill` accepts multiple job IDs. Add `--yes` to confirm deletion
+without an interactive prompt.
+
+</details>
+
+### Inspect allocations and resources
+
+Show the selected allocation's resource usage:
+
+```bash
+cloudru allocations resources
+```
+
+| Task | Command |
+| --- | --- |
+| Inspect allocation details | `cloudru allocations info` |
+| Inspect jobs and notebooks on nodes | `cloudru allocations workloads` |
+| Inspect running and waiting jobs in custom queues | `cloudru allocations queue` |
+| Find available instance types | `cloudru resources available` |
+| Report GPU usage | `cloudru resources used` |
+| List supported instance types | `cloudru resources instance-types` |
+| List accessible workspaces | `cloudru workspace list` |
+
+<details>
+<summary>Allocation defaults, filters, and overrides</summary>
+
+`cloudru allocations use` shows your saved default; `--clear` removes it.
+Allocation inspection commands accept either a UUID or an exact, case-sensitive
+name. Replace `<ALLOCATION_NAME_OR_ID>` and `<REGION>` with your allocation and region:
+
+```bash
+cloudru allocations info <ALLOCATION_NAME_OR_ID> --json
+cloudru allocations queue --status Pending
+cloudru allocations workloads --type notebook
+cloudru resources available --allocation <ALLOCATION_NAME_OR_ID>
+cloudru resources available --all
+cloudru resources used --region <REGION> --n 2000
+```
+
+For `resources available`, `--all` includes instance types with zero availability.
+For `resources used`, `--all` queries all configured profiles and reports individual
+profile errors while continuing with successful profiles.
+
+</details>
+
+### Wait for free GPUs
+
+Retry submission when Cloud.ru reports that too few GPUs are free:
+
+```bash
+cloudru jobs submit -f job.yaml --retry
+```
+
+Cloudru retries every 60 seconds until the job is accepted, another error occurs,
+or you press Ctrl+C.
+
+<details>
+<summary>Retry timing and snapshot preparation</summary>
+
+Retries handle `PROJECT_GPU_LIMIT_REACHED_ONLY_<N>_FREE`. Use `--retry-interval 30`
+to change the delay or `--retry-timeout 2h` to limit waiting to two hours. Both
+require `--retry`; the default waiting time is unlimited.
+
+Timeouts accept `s`, `m`, `h`, or `d`. Timing starts after preparation and upload;
+a request already in progress may finish later. Snapshot preparation and upload
+happen once, and local archives are kept if submission fails. With `--json`, retry
+progress goes to stderr and the final response goes to stdout.
+
+</details>
+
+### Connect over SSH
+
+For a running job, connect using your local OpenSSH client and a matching private
+key from `ssh-agent` or OpenSSH's default key files:
+
+```bash
+cloudru jobs ssh <JOB_ID>
+```
+
+<details>
+<summary>Explicit keys, worker selection, and connection preview</summary>
+
+Replace `<PRIVATE_KEY_PATH>` with your local private-key file:
+
+```bash
+cloudru jobs ssh <JOB_ID> -i <PRIVATE_KEY_PATH>
+cloudru jobs ssh <JOB_ID> --rank 1 -i <PRIVATE_KEY_PATH>
+cloudru jobs ssh <JOB_ID> --dry-run
+```
+
+The default rank is 0, the master pod. Rank 1 selects `mpiworker-0`, rank 2 selects
+`mpiworker-1`, and so on. Cloudru gets the workspace namespace and region-specific
+SSH gateway from the API. `--dry-run` prints the resolved SSH command.
+
+</details>
+
+### Use an SSH configuration with VS Code
+
+Generate an entry with an alias of your choice:
+
+```bash
+cloudru jobs ssh-config <JOB_ID> --alias cloudru-training
+```
+
+Paste the printed block into `~/.ssh/config`. Then run `ssh cloudru-training` or
+select `cloudru-training` in VS Code Remote SSH.
+
+<details>
+<summary>SSH configuration options</summary>
+
+Add `-i <PRIVATE_KEY_PATH>` to include a key file, or `--rank N` to select a worker.
+With the default identity handling, the output includes comments explaining how to
+configure your key. The default alias is `cloudru-<last-8-job-id-characters>-r<rank>`.
+
+</details>
+
+### Execute a command on a running job
+
+Put the remote command after `--`:
+
+```bash
+cloudru jobs exec <JOB_ID> -- nvidia-smi
+```
+
+<details>
+<summary>Interactive commands, keys, and shell syntax</summary>
+
+`jobs exec` uses the SSH connection settings above and returns the remote command's
+exit status. It accepts `-i <PRIVATE_KEY_PATH>`, `--rank N`, and `--dry-run`.
+
+```bash
+cloudru jobs exec <JOB_ID> --tty -- top
+cloudru jobs exec <JOB_ID> -- bash -lc 'nvidia-smi | grep A100'
+```
+
+Arguments are quoted for the remote shell. Use `bash -lc` for pipes, redirects,
+variable expansion, directory changes, or multiple commands.
+
+</details>
+
+### Report job costs
+
+Show API-reported training-job costs for the configured region over the last 30 days:
+
+```bash
+cloudru resources cost --since 30d
+```
+
+<details>
+<summary>Cost filters and interpretation</summary>
+
+```bash
+cloudru resources cost --all --group-by profile,region,n_gpus
+cloudru resources cost --n-gpus 1
+cloudru resources cost --region SR003 --region SR006 --json
+```
+
+Replace the example regions with your own. `--since` accepts durations such as
+`30m`, `12h`, `30d`, and `4w`, and filters by job creation time in UTC.
+Grouping supports `profile`, `region`, and `n_gpus`; the default is `profile,region`.
+With `--all`, each profile uses its configured region unless `--region` overrides it.
+
+Regions with zero total reported cost are omitted, including their job and GPU-hour
+counts. Running jobs use their current accrued cost and duration. Values come from
+the training-jobs API and are shown without an assumed currency. Use your billing
+report for the complete project invoice or continuous allocation charges.
+
+</details>
+
+## Optional Telegram bot
+
+The bot runs on your computer, checks configured profiles every 60 seconds, and
+sends notifications when job statuses change.
+
+Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token).
+In `~/.cloudru/telegram.ini`, replace `YOUR_TELEGRAM_BOT_TOKEN` with its token and
+`123456789` with the numeric ID of the chat allowed to use the bot and receive notifications:
 
 ```ini
 [bot]
@@ -500,30 +705,35 @@ allowed_chat_ids=123456789
 poll_interval_sec=60
 ```
 
-Optional env overrides:
-- `CLOUDRU_TELEGRAM_BOT_TOKEN`
-- `CLOUDRU_TELEGRAM_ALLOWED_CHAT_IDS`
-- `CLOUDRU_TELEGRAM_POLL_INTERVAL_SEC`
-
-Run bot:
+For a private chat, send your bot a message and find `message.chat.id` in the
+Telegram [getUpdates response](https://core.telegram.org/bots/api#getupdates) before
+starting the bot. Multiple allowed chat IDs can be separated by commas.
 
 ```bash
 cloudru bot run
 ```
 
-Bot UX is menu-based with Telegram inline buttons and submenus that mirror CLI hierarchy (`workspace`, `resources`, `jobs`).
-Text commands are still supported as a fallback.
+Open the bot in Telegram and send `/start` to use its menus. Keep the local process
+running to receive updates.
 
-Useful bot commands:
-- `/help`
-- `/jobs [n] [profile]`
-- `/status <job_id> [profile]`
-- `/logs <job_id> [tail] [profile]`
-- `/resources_used [profile|all]`
-- `/resources_available [profile|all] [region]`
-- `/instance_types [profile|all] [region]`
+<details>
+<summary>Bot commands and configuration overrides</summary>
 
-## Python API Quick Start
+Text commands are also available: `/help`, `/jobs [n] [profile]`,
+`/status <job_id> [profile]`, `/logs <job_id> [tail] [profile]`,
+`/resources_used [profile|all]`, `/resources_available [profile|all] [region]`, and
+`/instance_types [profile|all] [region]`.
+
+Environment overrides are `CLOUDRU_TELEGRAM_BOT_TOKEN`,
+`CLOUDRU_TELEGRAM_ALLOWED_CHAT_IDS`, and `CLOUDRU_TELEGRAM_POLL_INTERVAL_SEC`.
+Use `cloudru bot run --profile NAME --no-all` to monitor one profile.
+
+</details>
+
+## Python API
+
+Create a client using the credentials described in [CLI Quick Start](#cli-quick-start).
+Replace the four credential placeholders, then reuse `cloud_client` in the examples below:
 
 ```python
 from cloudru_utils import CloudRuAPIClient
@@ -534,75 +744,151 @@ cloud_client = CloudRuAPIClient(
     x_api_key="YOUR_X_API_KEY",
     x_workspace_id="YOUR_WORKSPACE_ID",
 )
-
 cloud_client.jobs(n_last=10)
-cloud_client.jobs(n_last=10, allocation_name="alloc-airi-master-jobs-h100-sr006")
-cloud_client.job_status("lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
 ```
 
-## Python API: Submit Job Example
+To submit a job, choose an image, instance type, region, and allocation available
+to your workspace. Replace the uppercase placeholders and check the example image:
 
 ```python
-from cloudru_utils import CloudRuAPIClient
-
-cloud_client = CloudRuAPIClient(
-    client_id="YOUR_CLIENT_ID",
-    client_secret="YOUR_CLIENT_SECRET",
-    x_api_key="YOUR_X_API_KEY",
-    x_workspace_id="YOUR_WORKSPACE_ID",
-)
-
-resp = cloud_client.submit_job(
-    script="python train.py --epochs 1",
+response = cloud_client.submit_job(
+    script="python --version",
     base_image="cr.ai.cloud.ru/aicloud-base-images/py3.11-torch2.4.0:0.0.40",
-    instance_type="a100plus.1gpu.80vG.12C.96G",
-    region="SR006",
-    # allocation_name="alloc-airi-master-jobs-h100-sr006",
+    instance_type="REPLACE_WITH_INSTANCE_TYPE",
+    region="REPLACE_WITH_REGION",
+    allocation_name="REPLACE_WITH_ALLOCATION_NAME",
     job_type="binary",
     n_workers=1,
     processes_per_worker=1,
-    conda_env="/home/jovyan/your/env",
-    env_variables={"HF_HOME": "/home/jovyan/data/.cache/huggingface"},
-    job_desc="quick smoke run",
+    job_desc="first-python-job",
 )
-print(resp)
+job_id = response["job_name"]
+cloud_client.job_status(job_id)
 ```
 
-Tip: use `cloud_client.instance_types(...)` and `cloud_client.available_resources(...)` to pick valid `instance_type` values.
+<details>
+<summary>More Python examples</summary>
 
-## Python API Examples
+Replace the allocation and region placeholders with your own values. The `job_id`
+variable below comes from a successful submission above.
 
 ```python
-# Workspace info and allocations
+allocation = "REPLACE_WITH_ALLOCATION_NAME_OR_ID"
+region = "REPLACE_WITH_REGION"
 cloud_client.workspace_info(refresh=False)
-
-# Allocation summaries, details, and live resource status
-allocation_id = "00000000-0000-4000-8000-000000000000"
 cloud_client.allocations()
-cloud_client.allocation_info(allocation_id)
-cloud_client.allocation_status("alloc-airi-master-jobs-h100-sr006")
-cloud_client.allocation_queue("alloc-airi-master-jobs-h100-sr006", status_in=["Running"], n_last=50)
-rows = cloud_client.allocation_queue(allocation_id, return_data=True, show_table=False)
-cloud_client.allocation_workloads(allocation_id)
-notebooks = cloud_client.allocation_workloads(allocation_id, types=["notebook"], return_data=True, show_table=False)
-
-# Supported instance types in region
-cloud_client.instance_types(region="SR006")
-
-# Available resources (auto source/fallback)
-cloud_client.available_resources(only_available=True)
-cloud_client.available_resources(source="instance_types_available")
-
-# Used resources (running, pending, total)
-cloud_client.used_resources(regions=["SR006"], n_last=1000)
-
-# Logs and stop job
-job_id = "lm-mpi-job-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-cloud_client.job_logs(job_id, tail=100, verbose=True, region="SR006")
-cloud_client.kill_job(job_id, region="SR006")
+cloud_client.allocation_info(allocation)
+cloud_client.allocation_resources(allocation)
+cloud_client.allocation_queue(allocation, status_in=["Running"], n_last=50)
+rows = cloud_client.allocation_queue(allocation, return_data=True, show_table=False)
+cloud_client.allocation_workloads(allocation)
+notebooks = cloud_client.allocation_workloads(
+    allocation, types=["notebook"], return_data=True, show_table=False,
+)
+cloud_client.instance_types(region=region)
+cloud_client.available_resources(allocation_id=allocation, only_available=True)
+cloud_client.available_resources(allocation_id=allocation, source="allocation_instance_types")
+cloud_client.used_resources(regions=[region], n_last=1000)
+cloud_client.jobs(n_last=10, allocation_name="REPLACE_WITH_ALLOCATION_NAME")
+cloud_client.job_logs(job_id, tail=100, verbose=True, region=region)
 ```
 
-## API Reference
+To stop and delete a job, call `cloud_client.kill_job(job_id, region=region)`.
+Allocation inspection methods accept UUIDs or exact, case-sensitive names.
+
+</details>
+
+## Configuration and reference
+
+Use `cloudru --help` or a command's `--help`, such as `cloudru jobs submit --help`,
+for all CLI options.
+
+<details>
+<summary>Profiles, saved settings, and environment variables</summary>
+
+The CLI uses the `default` profile unless you select another. To add and use a profile:
+
+```bash
+cloudru init --profile work
+cloudru --profile work jobs list
+```
+
+Profile selection is `--profile`, then `CLOUDRU_PROFILE`, then `default`.
+Each profile stores its credentials, defaults, and cached access token in these files:
+
+| File | Contents |
+| --- | --- |
+| `~/.cloudru/credentials` | `client_id`, `client_secret`, `x_api_key`, `x_workspace_id` |
+| `~/.cloudru/config` | Region, resource source, selected allocation, and snapshot storage defaults |
+| `~/.cloudru/token_cache` | Cached access tokens |
+
+`CLOUDRU_CLIENT_ID`, `CLOUDRU_CLIENT_SECRET`, `CLOUDRU_X_API_KEY`, and
+`CLOUDRU_X_WORKSPACE_ID` override saved credentials. `CLOUDRU_REGION` and
+`CLOUDRU_SOURCE` override the corresponding defaults.
+
+Resource sources are `auto` (regional availability with allocation fallback),
+`instance_types_available` (regional only), and `allocation_instance_types`
+(allocation only). Keep `auto` for ordinary use.
+
+For submission, explicit CLI options override YAML fields. The selected allocation
+fills an omitted `job.allocation_name`. Its region fills an omitted `job.region`
+when using that allocation default; otherwise the configured region is used, with
+`SR006` as the final fallback. See [snapshot job reference](#snapshot-job-reference)
+for S3 settings and path rules.
+
+</details>
+
+<details>
+<summary>Setup options for jobs using existing code</summary>
+
+See [Run code already available for the job](#run-code-already-available-for-the-job)
+for a setup example and execution order.
+
+When `conda_env` is set, the default shell initialization is
+`eval "$(conda shell.bash hook)"`. Set `shell_init` to customize it.
+`print_pwd` defaults to `false`. `pre_command` accepts a string or a list of strings.
+Use `job.env_variables` to set environment variables.
+
+Setup and the script form one submitted command. Dry-run displays the merged
+configuration and `Command to run`. The [full example](examples/job.yaml) shows
+additional settings. Snapshot startup follows the order in its
+[own reference](#snapshot-job-reference).
+
+</details>
+
+<details>
+<summary>Submission overrides and structured output</summary>
+
+```bash
+cloudru jobs submit -f job.yaml --job-desc exp-001 --env WANDB_MODE=offline
+cloudru jobs submit -f job.yaml --pre-command 'python -V'
+cloudru jobs submit -f job.yaml --json
+```
+
+`--env KEY=VALUE` overrides individual environment variables. `--pre-command`
+replaces the configured pre-command list; repeat the option to supply multiple
+commands. Other overrides include `--allocation-name`, `--region`, `--workdir`,
+and `--conda-env`.
+
+Ordinary submission's `--json` returns the API response, whose `job_name` identifies
+an accepted job. Snapshot submission returns `job_id`, `job_dir`, `snapshot_uri`,
+and the API response, plus output and archive paths when applicable.
+
+</details>
+
+<details>
+<summary>Shell completion</summary>
+
+Install completion for your shell, then follow the printed instructions:
+
+```bash
+cloudru --install-completion
+```
+
+</details>
+
+<details>
+<summary>Python API reference</summary>
 
 - `show_current_jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=-1)`
 - `CloudRuAPIClient(client_id, client_secret, x_api_key=None, x_workspace_id=None, ...)`
@@ -618,27 +904,23 @@ cloud_client.kill_job(job_id, region="SR006")
 - `workspaces(table_width=160, return_data=False, show_table=True)`
 - `allocations(table_width=160, return_data=False, show_table=True)`
 - `allocation_info(allocation_id, table_width=160, return_data=False, show_table=True)`
-- `allocation_status(allocation_id, table_width=160, return_data=False, show_table=True)`
+- `allocation_resources(allocation_id, table_width=160, return_data=False, show_table=True)`
 - `allocation_queue(allocation_id, status_in=None, status_not_in=None, regions=None, queues=None, workspace_id=None, n_last=20, table_width=160, return_data=False, show_table=True, workspace_names=None, workspace_ids=None)`
 - `allocation_workloads(allocation_id, types=None, status_in=None, status_not_in=None, n_last=None, table_width=160, return_data=False, show_table=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
 - `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
 - `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True)`
 
-`allocation_info()`, `allocation_status()`, `allocation_queue()`, and `allocation_workloads()` accept either an allocation UUID or an exact, case-sensitive allocation name.
+`allocation_info()`, `allocation_resources()`, `allocation_queue()`, and `allocation_workloads()` accept either an allocation UUID or an exact, case-sensitive allocation name.
 
-## Notes
+`show_current_jobs` uses the optional Cloud.ru `client_lib` package.
+`CloudRuAPIClient` uses the explicit credentials shown in the Python example.
 
-- CLI supports monitoring/control workflows and YAML-based job submission.
-- `cloudru resources used --all` works in best-effort mode and reports profiles with errors without failing the whole command if at least one profile succeeds.
-- `submit_job` exposes many API parameters; validate your runtime/env/image settings for your workspace.
-- If `client_lib` is not installed, `show_current_jobs` is unavailable, but `CloudRuAPIClient` still works with explicit workspace headers.
+</details>
 
-## Example script and job yaml:
-- `examples/example.sh`
-- `examples/job.yaml`
-- [Managed snapshot job](examples/snapshot-job-example.yaml)
+## Example files
 
-## Example notebook (a bit outdated)
-
-- `examples/cloudru_utils_example.ipynb`
+- [Example script](examples/example.sh): writes `results/result.txt`.
+- [Job using existing code](examples/job.yaml): customize its remote paths and environment.
+- [Snapshot job](examples/snapshot-job-example.yaml): packages local code and collects outputs.
+- [Older example notebook](examples/cloudru_utils_example.ipynb): some examples may need updating.
