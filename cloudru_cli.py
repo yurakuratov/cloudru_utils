@@ -846,6 +846,7 @@ def cmd_allocations_queue(
     status: Optional[list[str]] = typer.Option(None, "--status", help="Repeatable or comma-separated"),
     status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Repeatable or comma-separated"),
     queue: Optional[list[str]] = typer.Option(None, "--queue", help="Queue UUID or exact name; repeatable"),
+    priority: bool = typer.Option(False, "--priority", help="Show the compact priority column (P)"),
     workspace: Optional[list[str]] = typer.Option(None, "--workspace", help="Filter by workspace names (exact, case-sensitive); repeat flag or comma-separate multiple names; cannot combine with --workspace-id"),
     workspace_id: Optional[list[str]] = typer.Option(None, "--workspace-id", help="Filter by owning workspace UUIDs; repeat flag or comma-separate multiple IDs; cannot combine with --workspace"),
     all_profile_workspaces: bool = typer.Option(False, "--all-profile-workspaces", help="Filter to workspace IDs from all saved profiles; authenticate using --profile; cannot combine with --workspace or --workspace-id"),
@@ -883,6 +884,7 @@ def cmd_allocations_queue(
             regions=region, queues=queue, workspace_id=None, n_last=n,
             workspace_names=workspace_names,
             workspace_ids=workspace_ids,
+            show_priority=priority,
             table_width=table_width, return_data=as_json, show_table=not as_json,
         )
         if as_json:
