@@ -535,7 +535,7 @@ cloudru allocations resources
 
 | Task | Command |
 | --- | --- |
-| Inspect allocation details | `cloudru allocations info` |
+| Inspect allocation details, resources, and queues | `cloudru allocations info` |
 | Inspect jobs and notebooks on nodes | `cloudru allocations workloads` |
 | Inspect running and waiting jobs in custom queues | `cloudru allocations queue` |
 | Find available instance types | `cloudru resources available` |
@@ -552,12 +552,16 @@ name. Replace `<ALLOCATION_NAME_OR_ID>` and `<REGION>` with your allocation and 
 
 ```bash
 cloudru allocations info <ALLOCATION_NAME_OR_ID> --json
-cloudru allocations queue --status Pending
+cloudru allocations queue
 cloudru allocations workloads --type notebook
 cloudru resources available --allocation <ALLOCATION_NAME_OR_ID>
 cloudru resources available --all
 cloudru resources used --region <REGION> --n 2000
 ```
+
+Use `cloudru allocations queue --priority` to show the optional `P` column:
+`H`/`M`/`L` for high/medium/low, `sM`/`sL` for shared-medium/shared-low, and `sC` for shared-cluster. `—` means no priority was returned; `?` means an unrecognized value.
+The full API value is preserved as `priority` in `--json` output.
 
 For `resources available`, `--all` includes instance types with zero availability.
 For `resources used`, `--all` queries all configured profiles and reports individual
@@ -681,9 +685,10 @@ Replace the example regions with your own. `--since` accepts durations such as
 `30m`, `12h`, `30d`, and `4w`, and filters by job creation time in UTC.
 Grouping supports `profile`, `region`, and `n_gpus`; the default is `profile,region`.
 With `--all`, each profile uses its configured region unless `--region` overrides it.
+GPU-hours share shows each group's percentage of total GPU-hours. JSON rows expose this as `gpu_hours_share_pct`.
 
-Regions with zero total reported cost are omitted, including their job and GPU-hour
-counts. Running jobs use their current accrued cost and duration. Values come from
+Jobs with zero reported cost are included in every grouping and in the job and
+GPU-hour totals. Running jobs use their current accrued cost and duration. Values come from
 the training-jobs API and are shown without an assumed currency. Use your billing
 report for the complete project invoice or continuous allocation charges.
 

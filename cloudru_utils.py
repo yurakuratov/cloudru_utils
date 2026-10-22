@@ -9,6 +9,8 @@ import io
 import json
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from copy import copy
 
 from rich.table import Table
 from rich.console import Console
@@ -495,11 +497,14 @@ class CloudRuAPIClient:
             raise RuntimeError('Unexpected response from List allocations. Expected an array of objects.')
         return data
 
-    def _get_allocation_queues(self, allocation_id):
+    def _get_allocation_queues(self, allocation_id, workspace_id=None):
+        params = {'allocation_id': allocation_id}
+        if workspace_id is not None:
+            params['workspace_id'] = workspace_id
         try:
             data = self._get_allocation_api(
                 '/queues/', f'List queues for allocation {allocation_id}', list,
-                params={'allocation_id': allocation_id},
+                params=params,
             )
         except RuntimeError as exc:
             if 'HTTP 409' in str(exc) and 'Custom queues are not activated' in str(exc):
@@ -536,10 +541,11 @@ class CloudRuAPIClient:
         except (ValueError, TypeError, AttributeError, OverflowError):
             return None
 
-    def _get_allocation_workspace_names(self, allocation_id, strict=False):
+    def _get_allocation_workspace_names(self, allocation_id, strict=False, allocation=None):
         """Best-effort display names, or required metadata for workspace filtering."""
         try:
-            allocation = self._get_allocation(allocation_id)
+            if allocation is None:
+                allocation = self._get_allocation(allocation_id)
         except (RuntimeError, requests.RequestException) as exc:
             if strict:
                 raise RuntimeError(f'Cannot resolve workspace names: {exc}') from exc
@@ -605,7 +611,8 @@ class CloudRuAPIClient:
 
     def allocation_queue(self, allocation_id, status_in=None, status_not_in=None, regions=None,
                         queues=None, workspace_id=None, n_last=20, table_width=160,
-                        return_data=False, show_table=True, workspace_names=None, workspace_ids=None):
+                        return_data=False, show_table=True, workspace_names=None, workspace_ids=None,
+                        show_priority=False):
         """List jobs exposed by allocation queues across visible workspaces.
 
         Allocation and queue selectors accept UUIDs or exact names. Filters are
@@ -700,7 +707,7 @@ class CloudRuAPIClient:
             jobs_data, f'Job Queue (Allocation: {resolved_name or resolved_id})',
             'Created', lambda job: self._format_job_datetime(job.get('created_dt')),
             lambda job: job.get('created_dt'), table_width=table_width,
-            show_table=show_table, allocation_context=True,
+            show_table=show_table, allocation_context=True, show_priority=show_priority,
         )
         return rows if return_data else None
 
@@ -1397,10 +1404,98 @@ class CloudRuAPIClient:
             return data
         return None
 
+    @staticmethod
+    def _render_allocation_queues(queues, title, console):
+        """Render queue metadata."""
+        if not queues:
+            console.print(Panel.fit('No queues found for this allocation.', title=title))
+            return
+        table = Table(title=title)
+        columns = [('Name', 'magenta'), ('Queue ID', 'cyan'), ('Type', 'yellow'), ('Active', None)]
+        columns.append(('Description', None))
+        for column, style in columns:
+            table.add_column(column, style=style, overflow='fold')
+        for queue in queues:
+            active = queue.get('active')
+            row = [
+                Text(str(queue.get('name') or '')),
+                Text(queue['id']),
+                Text(str(queue.get('type') or '')),
+                Text('Yes', style='green') if active is True else
+                Text('No', style='red') if active is False else Text('—', style='dim'),
+            ]
+            row.append(Text(str(queue.get('description') or '')))
+            table.add_row(*row)
+        console.print(table)
+
+    @staticmethod
+    def _render_queue_workspaces(queues, console):
+        """Keep workspace assignments readable without repeating queue metadata."""
+        if not queues:
+            return
+        table = Table(title='Queue Workspaces', expand=True)
+        table.add_column('Queue', style='magenta', overflow='fold', max_width=24)
+        table.add_column('Workspaces', style='magenta', overflow='fold', ratio=1)
+        for queue in queues:
+            table.add_row(
+                Text(str(queue.get('name') or queue['id'])),
+                Text(', '.join(workspace['name'] for workspace in queue['workspaces']) or '—'),
+            )
+        console.print(table)
+
+    def _enrich_queue_workspaces(self, allocation_id, queues, workspaces):
+        """Return queue copies enriched using already-loaded workspace names."""
+        data = [dict(queue, workspaces=[]) for queue in queues]
+        if data:
+            queues_by_id = {queue['id']: queue for queue in data}
+            ordered_workspaces = sorted(workspaces.items(), key=lambda item: (item[1].casefold(), item[0]))
+
+            def assigned_queues(workspace):
+                # Isolate token refresh state across concurrent read-only requests.
+                reader = copy(self)
+                reader._token_persist_callback = None
+                return {queue['id'] for queue in reader._get_allocation_queues(
+                    allocation_id, workspace_id=workspace[0],
+                )}
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                assignments = list(executor.map(assigned_queues, ordered_workspaces))
+            for (workspace_id, name), assigned_ids in zip(ordered_workspaces, assignments):
+                for queue_id in assigned_ids:
+                    if queue_id in queues_by_id:
+                        queues_by_id[queue_id]['workspaces'].append({'id': workspace_id, 'name': name})
+        return data
+
+    def allocation_queues(self, allocation_id, table_width=160, return_data=False, show_table=True):
+        """List queues with accessible allocation workspace assignments."""
+        resolved_id, resolved_name = self._resolve_allocation_selector(allocation_id)
+        queues = self._get_allocation_queues(resolved_id)
+        workspaces = self._get_allocation_workspace_names(resolved_id, strict=True) if queues else {}
+        data = self._enrich_queue_workspaces(resolved_id, queues, workspaces)
+        if show_table:
+            console = Console(width=table_width)
+            self._render_allocation_queues(
+                data, title=f'Queues — {resolved_name or resolved_id}',
+                console=console,
+            )
+            self._render_queue_workspaces(data, console)
+        return data if return_data else None
+
     def allocation_info(self, allocation_id, table_width=160, return_data=False, show_table=True):
         """Show allocation details with compact panels and terminal-capped tables."""
         resolved_id, _ = self._resolve_allocation_selector(allocation_id)
-        data = self._get_allocation(resolved_id)
+        data = dict(self._get_allocation(resolved_id))
+        try:
+            data['queues'] = self._get_allocation_queues(resolved_id)
+        except RuntimeError as exc:
+            if 'HTTP 409' not in str(exc) or 'Custom queues are not activated' not in str(exc):
+                raise
+            data['queues'] = None
+            data['queues_unavailable_reason'] = 'Custom queues are not activated.'
+
+        if data['queues']:
+            workspaces = self._get_allocation_workspace_names(resolved_id, strict=True, allocation=data)
+            data['queues'] = self._enrich_queue_workspaces(resolved_id, data['queues'], workspaces)
 
         if show_table:
             console = Console()
@@ -1434,6 +1529,12 @@ class CloudRuAPIClient:
                 title='Allocation Resources',
                 console=console,
             )
+
+            if data['queues'] is None:
+                console.print(Panel.fit(data['queues_unavailable_reason'], title='Allocation Queues'))
+            else:
+                self._render_allocation_queues(data['queues'], title='Allocation Queues', console=console)
+                self._render_queue_workspaces(data['queues'], console)
 
             nodes = data.get('nodes') or []
             if nodes:
@@ -2248,7 +2349,7 @@ class CloudRuAPIClient:
             row.update({key: job.get(key) for key in (
                 'api_job_id', 'allocation_id', 'allocation_name', 'workspace_id', 'workspace_name',
                 'queue_id', 'queue_name', 'namespace', 'instance_type', 'user_id',
-                'user_email', 'created_at',
+                'user_email', 'created_at', 'priority',
             )})
             row.update(
                 finished_dt_raw=None, finished_dt_display='Unknown',
@@ -2258,13 +2359,15 @@ class CloudRuAPIClient:
         return row
 
     def _render_jobs_table(self, jobs_data, table_title, time_column, time_getter, time_raw_getter,
-                           table_width=160, show_table=True, allocation_context=False):
+                           table_width=160, show_table=True, allocation_context=False, show_priority=False):
         table = Table(title=table_title)
         table.add_column(time_column, justify='left', style='cyan',
                          overflow='fold' if allocation_context else 'ellipsis',
                          min_width=19 if allocation_context else None)
         table.add_column('Job ID', no_wrap=True, justify='left', style='magenta')
         table.add_column('Status', justify='center', style='green')
+        if allocation_context and show_priority:
+            table.add_column('P', justify='center', width=2, no_wrap=True)
         table.add_column('Region', justify='center', style='yellow')
         table.add_column('GPUs', justify='center')
         table.add_column('Description', overflow='fold')
@@ -2289,6 +2392,12 @@ class CloudRuAPIClient:
                     row['time'],
                     row['job_id'],
                     f"[{status_style}]{row['status']}[/{status_style}]",
+                    *([{
+                        'high': 'H', 'medium': 'M', 'low': 'L',
+                        'shared-medium': 'sM',
+                        'shared-low': 'sL', 'shared-cluster': 'sC',
+                    }.get(row['priority'], '—' if not row['priority'] else '?')]
+                      if allocation_context and show_priority else []),
                     row['region'],
                     row['gpus'],
                     row['description'],
