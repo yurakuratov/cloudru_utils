@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import getpass
@@ -375,15 +374,8 @@ def _format_decimal(value: Decimal, places: int = 2) -> str:
 
 
 def _aggregate_cost_jobs(jobs: list[dict], group_by: list[str]) -> tuple[list[dict], dict]:
-    region_costs = defaultdict(lambda: Decimal("0"))
-    for job in jobs:
-        region_costs[(job["profile"], job["region"])] += job["reported_cost"]
-
-    paid_regions = {key for key, cost in region_costs.items() if cost != 0}
-    paid_jobs = [job for job in jobs if (job["profile"], job["region"]) in paid_regions]
-
     groups = {}
-    for job in paid_jobs:
+    for job in jobs:
         key = tuple(job[field] for field in group_by)
         group = groups.setdefault(
             key,
@@ -393,8 +385,8 @@ def _aggregate_cost_jobs(jobs: list[dict], group_by: list[str]) -> tuple[list[di
         group["gpu_hours"] += job["gpu_hours"]
         group["reported_cost"] += job["reported_cost"]
 
-    total_cost = sum((job["reported_cost"] for job in paid_jobs), Decimal("0"))
-    total_gpu_hours = sum((job["gpu_hours"] for job in paid_jobs), Decimal("0"))
+    total_cost = sum((job["reported_cost"] for job in jobs), Decimal("0"))
+    total_gpu_hours = sum((job["gpu_hours"] for job in jobs), Decimal("0"))
 
     rows = []
     for key, group in groups.items():
@@ -402,6 +394,11 @@ def _aggregate_cost_jobs(jobs: list[dict], group_by: list[str]) -> tuple[list[di
         row.update({
             "jobs": group["jobs"],
             "gpu_hours": float(_format_decimal(group["gpu_hours"])),
+            "gpu_hours_share_pct": (
+                round(float(group["gpu_hours"] / total_gpu_hours * Decimal(100)), 2)
+                if total_gpu_hours != 0
+                else 0.0
+            ),
             "reported_cost": _format_decimal(group["reported_cost"]),
             "cost_share_pct": (
                 round(float(group["reported_cost"] / total_cost * Decimal(100)), 2)
@@ -418,7 +415,7 @@ def _aggregate_cost_jobs(jobs: list[dict], group_by: list[str]) -> tuple[list[di
         )
     )
     totals = {
-        "jobs": len(paid_jobs),
+        "jobs": len(jobs),
         "gpu_hours": float(_format_decimal(total_gpu_hours)),
         "reported_cost": _format_decimal(total_cost),
     }
@@ -432,14 +429,16 @@ def _render_cost_report(report: dict, table_width: int) -> None:
         table.add_column(labels[field], style="cyan" if field == "profile" else "yellow")
     table.add_column("Jobs", justify="right")
     table.add_column("GPU-hours", justify="right")
+    table.add_column("GPU-hours share", justify="right")
     table.add_column("Reported cost", justify="right", style="green")
-    table.add_column("Share", justify="right")
+    table.add_column("Cost share", justify="right")
 
     for row in report["rows"]:
         table.add_row(
             *[str(row[field]) for field in report["group_by"]],
             str(row["jobs"]),
             f"{row['gpu_hours']:.2f}",
+            f"{row['gpu_hours_share_pct']:.2f}%",
             row["reported_cost"],
             f"{row['cost_share_pct']:.2f}%",
         )
