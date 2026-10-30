@@ -610,9 +610,9 @@ class CloudRuAPIClient:
                 row['workspace_name'] = workspace['name']
 
     def allocation_queue(self, allocation_id, status_in=None, status_not_in=None, regions=None,
-                        queues=None, workspace_id=None, n_last=20, table_width=160,
-                        return_data=False, show_table=True, workspace_names=None, workspace_ids=None,
-                        show_priority=False):
+                         queues=None, workspace_id=None, n_last=20, table_width=None,
+                         return_data=False, show_table=True, workspace_names=None, workspace_ids=None,
+                         show_priority=False):
         """List jobs exposed by allocation queues across visible workspaces.
 
         Allocation and queue selectors accept UUIDs or exact names. Filters are
@@ -748,7 +748,7 @@ class CloudRuAPIClient:
         return loads
 
     def allocation_workloads(self, allocation_id, types=None, status_in=None, status_not_in=None,
-                             n_last=None, table_width=160, return_data=False, show_table=True):
+                             n_last=None, table_width=None, return_data=False, show_table=True):
         """Show jobs and notebooks assigned to allocation nodes, preserving their statuses.
 
         All workloads are shown by default. This view does not include work waiting
@@ -797,9 +797,11 @@ class CloudRuAPIClient:
                 if (not types or row['type'] in types)
                 and (not include or str(row['status']).casefold() in include)
                 and str(row['status']).casefold() not in exclude]
+
         def created_order(row):
             parsed = self._parse_allocation_job_datetime(row['created_at'])
             return parsed.timestamp() if parsed else float('-inf')
+
         rows.sort(key=created_order, reverse=True)
         if n_last is not None:
             rows = rows[:n_last]
@@ -807,16 +809,21 @@ class CloudRuAPIClient:
         for row in rows:
             row['nodes'].sort()
         if show_table:
+            console = Console(width=table_width)
+            show_user = any(self._job_user(row) for row in rows)
             label = resolved_name or allocation.get('name') or resolved_id
             table = Table(title=f'Workloads assigned to nodes (Allocation: {label})')
-            table.add_column('Created', style='cyan', min_width=19, overflow='fold')
+            table.add_column('Created', style='cyan', overflow='fold')
             table.add_column('Type', style='cyan')
-            table.add_column('Name', style='magenta', overflow='fold')
+            table.add_column('Name', style='magenta', no_wrap=True, overflow='ellipsis',
+                             max_width=max(1, console.width // 3))
             table.add_column('Status', justify='center')
             table.add_column('GPUs', justify='right')
             table.add_column('Description', overflow='fold')
             table.add_column('Workspace', overflow='fold')
             table.add_column('Nodes', overflow='fold')
+            if show_user:
+                table.add_column('User', overflow='fold')
             for row in rows:
                 workspace = row['workspace_name'] or row['workspace_id']
                 if not workspace and row['namespace']:
@@ -832,8 +839,9 @@ class CloudRuAPIClient:
                     str(row['gpu_count']) if row['gpu_count'] is not None else '—',
                     Text(row['description'] or ''),
                     Text(workspace or 'Unknown'), Text(', '.join(row['nodes'])),
+                    *([Text(self._job_user(row) or '—')] if show_user else []),
                 )
-            Console(width=table_width).print(table)
+            console.print(table)
         return rows if return_data else None
 
     def _resolve_allocation_selector(self, allocation_id):
@@ -2315,6 +2323,14 @@ class CloudRuAPIClient:
     def _job_finished_dt_raw(job):
         return job.get('completed_dt') or job.get('updated_dt') or job.get('created_dt')
 
+    @staticmethod
+    def _job_user(job):
+        for key in ('user_email', 'job_author', 'user_id'):
+            value = job.get(key)
+            if value and value != 'N/A':
+                return str(value)
+        return None
+
     def _normalize_job_row(self, job, primary_time_raw, primary_time_display, allocation_context=False):
         created_dt_raw = job.get('created_dt')
         finished_dt_raw = self._job_finished_dt_raw(job)
@@ -2344,12 +2360,14 @@ class CloudRuAPIClient:
             'duration_raw': job.get('duration', ''),
             'duration_display': self._format_job_duration(job.get('duration', '')),
             'duration': self._format_job_duration(job.get('duration', '')),
+            'user_email': job.get('user_email'),
+            'user_id': job.get('user_id'),
+            'job_author': job.get('job_author'),
         }
         if allocation_context:
             row.update({key: job.get(key) for key in (
                 'api_job_id', 'allocation_id', 'allocation_name', 'workspace_id', 'workspace_name',
-                'queue_id', 'queue_name', 'namespace', 'instance_type', 'user_id',
-                'user_email', 'created_at', 'priority',
+                'queue_id', 'queue_name', 'namespace', 'instance_type', 'created_at', 'priority',
             )})
             row.update(
                 finished_dt_raw=None, finished_dt_display='Unknown',
@@ -2360,11 +2378,13 @@ class CloudRuAPIClient:
 
     def _render_jobs_table(self, jobs_data, table_title, time_column, time_getter, time_raw_getter,
                            table_width=160, show_table=True, allocation_context=False, show_priority=False):
+        show_user = any(self._job_user(job) for job in jobs_data)
+        console = Console(width=table_width)
         table = Table(title=table_title)
         table.add_column(time_column, justify='left', style='cyan',
-                         overflow='fold' if allocation_context else 'ellipsis',
-                         min_width=19 if allocation_context else None)
-        table.add_column('Job ID', no_wrap=True, justify='left', style='magenta')
+                         overflow='fold' if allocation_context else 'ellipsis')
+        table.add_column('Job ID', no_wrap=True, justify='left', style='magenta', overflow='ellipsis',
+                         max_width=max(1, console.width // 3) if allocation_context or show_user else None)
         table.add_column('Status', justify='center', style='green')
         if allocation_context and show_priority:
             table.add_column('P', justify='center', width=2, no_wrap=True)
@@ -2376,6 +2396,8 @@ class CloudRuAPIClient:
         else:
             table.add_column('Cost', justify='right')
             table.add_column('Duration', justify='right')
+        if show_user:
+            table.add_column('User', overflow='fold')
 
         rendered_rows = []
         for job in jobs_data:
@@ -2403,14 +2425,14 @@ class CloudRuAPIClient:
                     row['description'],
                     *([str(row['workspace_name'] or row['workspace_id'] or '')]
                       if allocation_context else [row['cost'], row['duration']]),
+                    *([Text(self._job_user(row) or '—')] if show_user else []),
                 )
 
         if show_table:
-            console = Console(width=table_width)
             console.print(table)
         return rendered_rows
 
-    def jobs(self, status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160,
+    def jobs(self, status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=None,
              return_data=False, show_table=True, allocation_name=None):
         """Display jobs sorted by creation date.
 

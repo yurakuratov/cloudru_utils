@@ -898,7 +898,7 @@ cloudru --install-completion
 - `show_current_jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=-1)`
 - `CloudRuAPIClient(client_id, client_secret, x_api_key=None, x_workspace_id=None, ...)`
 - `submit_job(...)`
-- `jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=160, allocation_name=None)`
+- `jobs(status_in=[], status_not_in=[], regions=['SR006'], n_last=1000, table_width=None, allocation_name=None)`
 - `finished_jobs(regions=['SR006'], n_last=1000, status_in=None, table_width=160, return_data=False)`
 - `job_status(job_id)`
 - `job_ssh_target(job_id, rank=0)`
@@ -910,8 +910,8 @@ cloudru --install-completion
 - `allocations(table_width=160, return_data=False, show_table=True)`
 - `allocation_info(allocation_id, table_width=160, return_data=False, show_table=True)`
 - `allocation_resources(allocation_id, table_width=160, return_data=False, show_table=True)`
-- `allocation_queue(allocation_id, status_in=None, status_not_in=None, regions=None, queues=None, workspace_id=None, n_last=20, table_width=160, return_data=False, show_table=True, workspace_names=None, workspace_ids=None)`
-- `allocation_workloads(allocation_id, types=None, status_in=None, status_not_in=None, n_last=None, table_width=160, return_data=False, show_table=True)`
+- `allocation_queue(allocation_id, status_in=None, status_not_in=None, regions=None, queues=None, workspace_id=None, n_last=20, table_width=None, return_data=False, show_table=True, workspace_names=None, workspace_ids=None)`
+- `allocation_workloads(allocation_id, types=None, status_in=None, status_not_in=None, n_last=None, table_width=None, return_data=False, show_table=True)`
 - `instance_types(region=None, refresh_configs=False, table_width=160, return_data=False)`
 - `available_resources(allocation_id=None, only_available=True, refresh_workspace=False, table_width=160, return_data=False, source='auto')`
 - `used_resources(regions=['SR006'], n_last=1000, table_width=160, return_data=False, show_table=True)`
