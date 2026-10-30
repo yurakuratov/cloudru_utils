@@ -851,7 +851,7 @@ def cmd_allocations_queue(
     all_profile_workspaces: bool = typer.Option(False, "--all-profile-workspaces", help="Filter to workspace IDs from all saved profiles; authenticate using --profile; cannot combine with --workspace or --workspace-id"),
     n: int = typer.Option(20, "--n", min=1, help="Maximum jobs across all selected queues"),
     as_json: bool = typer.Option(False, "--json", help="Print normalized job rows as JSON"),
-    table_width: int = typer.Option(160, "--table-width"),
+    table_width: Optional[int] = typer.Option(None, "--table-width", min=1, help="Table width; default: terminal width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
@@ -901,7 +901,7 @@ def cmd_allocations_workloads(
     status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Exclude statuses; repeatable or comma-separated"),
     n: Optional[int] = typer.Option(None, "--n", min=1, help="Maximum workloads; default: all, newest first"),
     as_json: bool = typer.Option(False, "--json", help="Print workload rows as JSON"),
-    table_width: int = typer.Option(160, "--table-width"),
+    table_width: Optional[int] = typer.Option(None, "--table-width", min=1, help="Table width; default: terminal width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
@@ -1244,7 +1244,7 @@ def cmd_jobs_list(
     status_not: Optional[list[str]] = typer.Option(None, "--status-not", help="Repeatable or comma-separated"),
     allocation_name: Optional[str] = typer.Option(None, "--allocation-name", help="Filter jobs within the current workspace by allocation name"),
     n: int = typer.Option(20, "--n", min=1),
-    table_width: int = typer.Option(160, "--table-width"),
+    table_width: Optional[int] = typer.Option(None, "--table-width", min=1, help="Table width; default: terminal width"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Profile name"),
     debug: bool = typer.Option(False, "--debug", help="Show full traceback on errors"),
 ) -> None:
